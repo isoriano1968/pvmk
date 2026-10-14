@@ -7,13 +7,17 @@
  */
 #include "pvmk/amiga.h"
 #include "pvmk/bootcap.h"
+#include "pvmk/bootreq.h"
 #include "pvmk/conf.h"
+#include "pvmk/ffs.h"
 #include "pvmk/keyboard.h"
 #include "pvmk/kprintf.h"
 #include "pvmk/layout.h"
 #include "pvmk/log.h"
 #include "pvmk/mk.h"
 #include "pvmk/paula.h"
+#include "pvmk/rdb.h"
+#include "pvmk/scsi.h"
 #include "pvmk/version.h"
 
 #define LINE_MAX	128
@@ -198,6 +202,7 @@ struct cmd {
 };
 
 static void cmd_help(int argc, char **argv);
+static void cmd_reset(int argc, char **argv);
 
 static void
 cmd_ver(int argc, char **argv)
@@ -256,13 +261,75 @@ cmd_conf(int argc, char **argv)
 	conf_show(&bootcap.conf);
 }
 
+static int
+part_block(void *ctx, u32 blk, void *buf)
+{
+	return part_read(ctx, blk, 1, buf) ? -1 : 0;
+}
+
+static void
+ls_entry(void *arg, const char *name, u32 size, int is_dir, u32 blk)
+{
+	(void)arg;
+	(void)blk;
+	if (is_dir)
+		kprintf("  %-32s   (dir)\n", name);
+	else
+		kprintf("  %-32s %7u\n", name, size);
+}
+
+/* ls dev:path on an AmigaDOS (OFS/FFS) partition */
+static void
+ls_part(const char *arg)
+{
+	static struct ffs fs;
+	char dev[32];
+	const char *path = arg;
+	struct partition *p;
+	u32 n = 0, blk;
+	int err, is_dir;
+
+	while (*path && *path != ':' && n < sizeof(dev) - 1)
+		dev[n++] = *path++;
+	dev[n] = 0;
+	if (*path == ':')
+		path++;
+	if (!(p = part_find(dev))) {
+		kprintf("ls: no partition %s\n", dev);
+		return;
+	}
+	if (p->target < 0) {
+		kprintf("ls: %s is on %s unit %u; after takeover SORIX-LDOM can only "
+		    "read disks on the A3000 internal SCSI\n", p->name, p->device,
+		    p->unit);
+		return;
+	}
+	if ((p->dostype >> 8) != 0x444f53) {
+		kprintf("ls: %s is not an AmigaDOS OFS/FFS partition\n", p->name);
+		return;
+	}
+	fs.read = part_block;
+	fs.ctx = p;
+	fs.root = (p->nblocks + 1) / 2;
+	err = ffs_lookup(&fs, path, &blk, &is_dir);
+	if (!err && is_dir)
+		err = ffs_list_dir(&fs, blk, ls_entry, NULL);
+	else if (!err)
+		kprintf("  %s\n", path);
+	if (err)
+		kprintf("ls: %s: %s\n", arg, ffs_strerror(err));
+}
+
 static void
 cmd_ls(int argc, char **argv)
 {
 	u32 i;
 
-	(void)argc;
-	(void)argv;
+	if (argc > 1 && !(argv[1][0] == 'd' && argv[1][1] == 'f' &&
+	    argv[1][2] == '0')) {
+		ls_part(argv[1]);
+		return;
+	}
 	if (!bootcap.nfiles) {
 		kprintf("no boot floppy directory cached\n");
 		return;
@@ -381,12 +448,93 @@ cmd_go(int argc, char **argv)
 }
 
 static void
+cmd_scsi(int argc, char **argv)
+{
+	(void)argc;
+	(void)argv;
+	if (scsi_init() != SCSI_OK) {
+		kprintf("scsi: no controller found\n");
+		return;
+	}
+	if (!disk_scan(1))
+		kprintf("scsi: no devices\n");
+	rdb_scan(1);
+}
+
+static void
+cmd_part(int argc, char **argv)
+{
+	(void)argc;
+	(void)argv;
+	part_show();
+}
+
+static int
+name_eq(const char *a, const char *b)
+{
+	for (; *a && *b; a++, b++)
+		if ((*a | 0x20) != (*b | 0x20))
+			return 0;
+	return *a == *b;
+}
+
+/*
+ * The floppy can only decline its boot; strap then boots the next bootable
+ * device in its priority order. Returns the name of that device, or NULL.
+ */
+static const char *
+next_boot_device(void)
+{
+	const struct bc_bootnode *best = NULL;
+	u32 i;
+
+	for (i = 0; i < bootcap.nbootnodes; i++) {
+		const struct bc_bootnode *b = &bootcap.bootnodes[i];
+
+		if (name_eq(b->name, "DF0") || b->pri == -128)
+			continue;
+		if (!best || b->pri > best->pri)
+			best = b;
+	}
+	return best ? best->name : NULL;
+}
+
+static void
+reboot_to_amigaos(const char *dev)
+{
+	kprintf("boot: rebooting; AmigaOS will start from %s\n", dev);
+	bootreq_set(sstack_top(), BOOTREQ_AMIGAOS, dev);
+	cmd_reset(0, NULL);
+}
+
+static void
 cmd_boot(int argc, char **argv)
 {
 	const char *what = argc > 1 ? argv[1] : bootcap.conf.def;
+	struct partition *p;
 
-	kprintf("boot: '%s': personality loaders arrive in M2\n",
-	    *what ? what : "(no default)");
+	if (!*what) {
+		kprintf("usage: boot <partition>   (see part)\n");
+		return;
+	}
+	if (!(p = part_find(what))) {
+		kprintf("boot: no partition %s (see part)\n", what);
+		return;
+	}
+	if (dostype_is_amigaos(p->dostype)) {
+		const char *next = next_boot_device();
+
+		if (!next || !name_eq(next, p->name)) {
+			kprintf("boot: %s: Kickstart boots %s first after the floppy; "
+			    "only that one can be selected from here\n", p->name,
+			    next ? next : "(no bootable device)");
+			return;
+		}
+		reboot_to_amigaos(p->name);
+	} else if ((p->dostype >> 8) == 0x554e49)
+		kprintf("boot: %s: AMIX loader arrives in M2\n", p->name);
+	else
+		kprintf("boot: %s: no loader for this partition type\n", p->name);
 }
 
 static void
@@ -406,14 +554,16 @@ static const struct cmd cmds[] = {
 	{ "cpu",   "",                  "CPU, FPU, MMU, VBR, CACR", cmd_cpu },
 	{ "mem",   "",                  "memory map and hole layout", cmd_mem },
 	{ "conf",  "",                  "configuration in effect", cmd_conf },
-	{ "ls",    "",                  "boot floppy directory", cmd_ls },
+	{ "ls",    "[dev:path]",        "floppy directory, or a partition's", cmd_ls },
+	{ "scsi",  "",                  "rescan SCSI devices and partitions", cmd_scsi },
+	{ "part",  "",                  "list partitions", cmd_part },
 	{ "md",    "<addr> [len]",      "memory dump", cmd_md },
 	{ "mw",    "[.b|.w|.l] <a> <v>", "memory write (mw.b, mw.w, mw.l)", cmd_mw },
 	{ "regs",  "",                  "registers of the last exception", cmd_regs },
 	{ "dmesg", "[-p]",              "boot log (-p: previous boot)", cmd_dmesg },
 	{ "sload", "<addr> <len>",      "receive raw bytes over serial", cmd_sload },
 	{ "go",    "<addr>",            "call code at addr, print D0", cmd_go },
-	{ "boot",  "[personality]",     "boot a personality (M2)", cmd_boot },
+	{ "boot",  "<partition>",       "boot it (AmigaOS: via Kickstart)", cmd_boot },
 	{ "reset", "",                  "reboot into Kickstart", cmd_reset },
 	{ NULL, NULL, NULL, NULL },
 };

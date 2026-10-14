@@ -11,6 +11,8 @@
  *	A0 = image base   A1 = IOStdReq   A6 = SysBase
  *	D0 = boot medium  D1 = serial baud
  * If the image returns D0 = 0, AmigaOS boot continues (dos.library init).
+ * BOOTBLOCK_DECLINE: free the image and return an error quietly, so strap
+ * goes on with the next boot device.
  *
  * Serial progress characters: B (entry) L (loaded) C (CRC ok) J (jump);
  * errors print "E" followed by a code letter and turn the screen red:
@@ -101,6 +103,8 @@ bb_entry:
 	move.l	%a3,%a2
 	add.l	PVBB_O_ENTRY(%a4),%a2
 	jsr	(%a2)
+	cmp.l	#BOOTBLOCK_DECLINE,%d0
+	beq.s	decline
 	tst.l	%d0
 	bne.s	out			/* image reported failure */
 
@@ -113,6 +117,13 @@ bb_entry:
 	move.l	%d0,%a0
 	move.l	RT_INIT(%a0),%a0
 	moveq	#0,%d0
+	bra.s	out
+
+decline:
+	move.l	%a3,%a1
+	move.l	PVBB_O_ALLOC(%a4),%d0
+	jsr	LVO_FreeMem(%a6)
+	moveq	#-1,%d0
 	bra.s	out
 
 fail:

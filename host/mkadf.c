@@ -1,15 +1,19 @@
 /*
- * mkadf — build and verify the pvmk boot floppy (880 KB DD, FFS "DOS\1").
+ * mkadf — build and verify FFS ("DOS\1") volumes: the pvmk boot floppy
+ * (880 KB DD ADF) and partition images for host/mkhdf.
  *
  *   mkadf -o pvmk.adf -b bootblock.bin -i pvmk.bin [-n PVMK] [--baud N]
  *         [-f dest=src]...
- *   mkadf --verify pvmk.adf [-q]
+ *   mkadf -o dh0.img --blocks N [-n NAME] [-f dest=src]...
+ *   mkadf --verify image [-q]
  *
  * Layout: the boot block (blocks 0-1) carries the PVBB parameter area; the
  * file "pvmk" is stored contiguously from block 2 so the boot block can load
- * it with one CMD_READ (FFS data blocks have no headers). Root block 880,
- * bitmap 881, all other files and directories after that. The result is a
- * normal AmigaDOS volume. SOURCE_DATE_EPOCH, if set, fixes the timestamps.
+ * it with one CMD_READ (FFS data blocks have no headers). The root block is
+ * at (blocks + 1) / 2 (880 on a floppy), followed by the bitmap block(s),
+ * then all other files and directories. Without -b the boot block is a
+ * plain "DOS\1" with no code. The result is a normal AmigaDOS volume.
+ * SOURCE_DATE_EPOCH, if set, fixes the timestamps.
  */
 #include <ctype.h>
 #include <stdarg.h>
@@ -22,10 +26,9 @@
 #include "pvmk/image.h"
 
 #define BSIZE		512
-#define NBLOCKS		1760		/* 80 cyl * 2 heads * 11 sectors */
-#define ADF_SIZE	(NBLOCKS * BSIZE)
-#define ROOT		880
-#define BITMAP		881
+#define ADF_BLOCKS	1760		/* 80 cyl * 2 heads * 11 sectors */
+#define BM_BITS		(127 * 32)	/* blocks covered by one bitmap block */
+#define MAX_BM		25		/* bm_pages[] in the root block */
 #define HT_SIZE		72
 #define MAXNAME		30
 
@@ -56,7 +59,9 @@
 #define O_EXTENSION	504
 #define O_SECTYPE	508
 
-static uint8_t disk[ADF_SIZE];
+static uint8_t *disk;
+static uint8_t *used, *seen;		/* per block: built / found in use */
+static uint32_t nblocks, root_blk, bm_count;
 static int verbose = 1;
 
 static void
@@ -177,8 +182,7 @@ struct node {
 	uint32_t hash_chain;
 };
 
-static uint8_t used[NBLOCKS];
-static uint32_t cursor = BITMAP + 1;
+static uint32_t cursor;
 static uint32_t days, mins, ticks;
 
 static uint32_t
@@ -186,10 +190,10 @@ alloc_block(void)
 {
 	uint32_t i, b;
 
-	for (i = 0; i < NBLOCKS; i++) {
+	for (i = 0; i < nblocks; i++) {
 		b = cursor + i;
-		if (b >= NBLOCKS)
-			b = 2 + (b - NBLOCKS) % (NBLOCKS - 2);
+		if (b >= nblocks)
+			b = 2 + (b - nblocks) % (nblocks - 2);
 		if (!used[b]) {
 			used[b] = 1;
 			cursor = b + 1;
@@ -330,7 +334,7 @@ write_tree(struct node *dir)
 
 	for (n = dir->children; n; n = n->next) {
 		uint8_t *b = blk(n->block);
-		uint32_t parent = dir->parent ? dir->block : ROOT;
+		uint32_t parent = dir->parent ? dir->block : root_blk;
 
 		wr32(b + O_TYPE, T_HEADER);
 		wr32(b + O_KEY, n->block);
@@ -398,11 +402,30 @@ set_date(void)
 	ticks = (uint32_t)(s % 60 * 50);
 }
 
+/* Size the volume: root block in the middle, bitmap blocks after it. */
+static void
+geometry(uint32_t n)
+{
+	if (n < 8)
+		die("%s", "volume too small");
+	nblocks = n;
+	root_blk = (n + 1) / 2;
+	bm_count = (n - 2 + BM_BITS - 1) / BM_BITS;
+	if (bm_count > MAX_BM)
+		die("%s", "volume too large (bitmap extension blocks not supported)");
+	disk = calloc(n, BSIZE);
+	used = calloc(n, 1);
+	seen = calloc(n, 1);
+	if (!disk || !used || !seen)
+		die("%s", "out of memory");
+	cursor = root_blk + 1 + bm_count;
+}
+
 static int
 build(const char *out, const char *bootpath, const char *imgpath,
     const char *volname, uint32_t baud, int nfiles, char **files)
 {
-	struct node root = { .is_dir = 1, .block = ROOT };
+	struct node root = { .is_dir = 1, .block = root_blk };
 	struct node *pvmk = NULL;
 	uint8_t *bb, *rb, *bm;
 	size_t bbsize;
@@ -411,7 +434,9 @@ build(const char *out, const char *bootpath, const char *imgpath,
 	int k;
 
 	set_date();
-	used[0] = used[1] = used[ROOT] = used[BITMAP] = 1;
+	used[0] = used[1] = used[root_blk] = 1;
+	for (b = 0; b < bm_count; b++)
+		used[root_blk + 1 + b] = 1;
 
 	if (strlen(volname) > MAXNAME)
 		die("volume name too long: %s", volname);
@@ -420,7 +445,7 @@ build(const char *out, const char *bootpath, const char *imgpath,
 		pvmk = add_path(&root, "pvmk");
 		pvmk->data = read_file(imgpath, &pvmk->size);
 		pvmk->fixed_start = 2;
-		if (2 + (pvmk->size + BSIZE - 1) / BSIZE > ROOT)
+		if (2 + (pvmk->size + BSIZE - 1) / BSIZE > root_blk)
 			die("%s does not fit below the root block", imgpath);
 		for (b = 2; b < 2 + (pvmk->size + BSIZE - 1) / BSIZE; b++)
 			used[b] = 1;
@@ -437,7 +462,7 @@ build(const char *out, const char *bootpath, const char *imgpath,
 	}
 
 	alloc_tree(&root);
-	rb = blk(ROOT);
+	rb = blk(root_blk);
 	write_hash_table(rb, &root);	/* before write_tree: sets chains */
 	write_tree(&root);
 
@@ -445,7 +470,8 @@ build(const char *out, const char *bootpath, const char *imgpath,
 	wr32(rb + O_TYPE, T_HEADER);
 	wr32(rb + O_HTSIZE, HT_SIZE);
 	wr32(rb + O_BMFLAG, 0xffffffff);
-	wr32(rb + O_BMPAGES, BITMAP);
+	for (b = 0; b < bm_count; b++)
+		wr32(rb + O_BMPAGES + b * 4, root_blk + 1 + b);
 	write_date(rb, O_DAYS);
 	write_date(rb, O_VDAYS);
 	write_date(rb, O_CDAYS);
@@ -453,23 +479,32 @@ build(const char *out, const char *bootpath, const char *imgpath,
 	wr32(rb + O_SECTYPE, ST_ROOT);
 	wr32(rb + O_CHKSUM, blocksum(rb, O_CHKSUM));
 
-	/* Bitmap: bit set = free; covers blocks 2..NBLOCKS-1. */
-	bm = blk(BITMAP);
-	for (b = 2; b < NBLOCKS; b++)
+	/* Bitmap: bit set = free; covers blocks 2..nblocks-1. */
+	for (b = 2; b < nblocks; b++)
 		if (!used[b]) {
-			uint32_t idx = b - 2, off = 4 + idx / 32 * 4;
+			uint32_t idx = b - 2, j = idx % BM_BITS;
+			uint32_t off = 4 + j / 32 * 4;
 
-			wr32(bm + off, rd32(bm + off) | 1u << (idx % 32));
+			bm = blk(root_blk + 1 + idx / BM_BITS);
+			wr32(bm + off, rd32(bm + off) | 1u << (j % 32));
 		}
-	wr32(bm, blocksum(bm, 0));
+	for (b = 0; b < bm_count; b++) {
+		bm = blk(root_blk + 1 + b);
+		wr32(bm, blocksum(bm, 0));
+	}
 
 	/* Boot block + PVBB */
-	bb = read_file(bootpath, &bbsize);
-	if (bbsize != 2 * BSIZE)
-		die("boot block %s must be exactly 1024 bytes", bootpath);
-	if (memcmp(bb, "DOS\1", 4) != 0)
-		die("boot block %s does not start with DOS\\1", bootpath);
-	memcpy(disk, bb, bbsize);
+	if (bootpath) {
+		bb = read_file(bootpath, &bbsize);
+		if (bbsize != 2 * BSIZE)
+			die("boot block %s must be exactly 1024 bytes", bootpath);
+		if (memcmp(bb, "DOS\1", 4) != 0)
+			die("boot block %s does not start with DOS\\1", bootpath);
+		memcpy(disk, bb, bbsize);
+	} else {
+		memcpy(disk, "DOS\1", 4);
+		wr32(disk + 8, root_blk);
+	}
 	if (pvmk) {
 		uint8_t *p = disk + PVBB_OFFSET;
 		uint32_t nblk = (uint32_t)((pvmk->size + BSIZE - 1) / BSIZE);
@@ -493,13 +528,14 @@ build(const char *out, const char *bootpath, const char *imgpath,
 	}
 	wr32(disk + 4, bootsum(disk));
 
-	if (!(f = fopen(out, "wb")) || fwrite(disk, 1, ADF_SIZE, f) != ADF_SIZE)
+	if (!(f = fopen(out, "wb")) ||
+	    fwrite(disk, BSIZE, nblocks, f) != nblocks)
 		die("cannot write %s", out);
 	fclose(f);
-	for (i = 0, b = 0; b < NBLOCKS; b++)
+	for (i = 0, b = 0; b < nblocks; b++)
 		i += used[b];
 	printf("mkadf: %s: volume %s, %u/%u blocks used", out, volname, i,
-	    NBLOCKS);
+	    nblocks);
 	if (pvmk)
 		printf(", pvmk %zu bytes at block 2", pvmk->size);
 	printf("\n");
@@ -510,7 +546,6 @@ build(const char *out, const char *bootpath, const char *imgpath,
 /* Verifying                                                           */
 
 static int errors;
-static uint8_t seen[NBLOCKS];
 static uint32_t pvmk_first, pvmk_n, pvmk_size;
 static int pvmk_contig = -1;
 
@@ -530,7 +565,7 @@ err(const char *fmt, ...)
 static int
 claim(uint32_t b, const char *what, const char *path)
 {
-	if (b < 2 || b >= NBLOCKS) {
+	if (b < 2 || b >= nblocks) {
 		err("%s: %s block %u out of range", path, what, b);
 		return 0;
 	}
@@ -621,7 +656,7 @@ walk_dir(uint32_t dirblk, const char *path, int depth)
 		uint32_t b = rd32(d + O_TABLE + h * 4);
 		int guard = 0;
 
-		while (b && guard++ < NBLOCKS) {
+		while (b && guard++ < (int)nblocks) {
 			const uint8_t *e;
 			char name[MAXNAME + 1], sub[512];
 			int32_t st;
@@ -666,13 +701,20 @@ verify(const char *path)
 	FILE *f = fopen(path, "rb");
 	const uint8_t *rb, *bm, *p;
 	char vol[MAXNAME + 1];
-	uint32_t b, nfree = 0;
+	uint32_t b, k, nfree = 0, bmblk[MAX_BM];
+	long size;
 	int have_pvbb;
 
 	if (!f)
 		die("cannot open %s", path);
-	if (fread(disk, 1, ADF_SIZE, f) != ADF_SIZE || fgetc(f) != EOF)
-		die("%s is not an 880 KB DD ADF image", path);
+	fseek(f, 0, SEEK_END);
+	size = ftell(f);
+	rewind(f);
+	if (size <= 0 || size % BSIZE)
+		die("%s: size is not a multiple of 512 bytes", path);
+	geometry((uint32_t)(size / BSIZE));
+	if (fread(disk, BSIZE, nblocks, f) != nblocks)
+		die("cannot read %s", path);
 	fclose(f);
 
 	if (memcmp(disk, "DOS", 3) != 0)
@@ -681,11 +723,11 @@ verify(const char *path)
 		err("boot block: DOS\\%d, expected DOS\\1 (FFS)", disk[3]);
 	if (bootsum(disk) != rd32(disk + 4))
 		err("boot block: checksum bad");
-	if (rd32(disk + 8) != ROOT)
+	if (rd32(disk + 8) != root_blk)
 		err("boot block: root block %u, expected %u", rd32(disk + 8),
-		    ROOT);
+		    root_blk);
 
-	rb = blk(ROOT);
+	rb = blk(root_blk);
 	if (rd32(rb + O_TYPE) != T_HEADER || (int32_t)rd32(rb + O_SECTYPE) !=
 	    ST_ROOT || rd32(rb + O_HTSIZE) != HT_SIZE)
 		err("root block: bad type/sec_type/ht_size");
@@ -694,25 +736,30 @@ verify(const char *path)
 	if (rd32(rb + O_BMFLAG) != 0xffffffff)
 		err("root block: bitmap not marked valid");
 	get_name(rb, vol);
-	seen[ROOT] = 1;
+	seen[root_blk] = 1;
 	if (verbose)
-		printf("%s: volume %s\n", path, vol);
+		printf("%s: volume %s, %u blocks\n", path, vol, nblocks);
 
-	b = rd32(rb + O_BMPAGES);
-	if (b < 2 || b >= NBLOCKS) {
-		err("root block: bitmap block %u out of range", b);
-		return 1;
+	for (k = 0; k < bm_count; k++) {
+		b = rd32(rb + O_BMPAGES + k * 4);
+		if (b < 2 || b >= nblocks) {
+			err("root block: bitmap block %u out of range", b);
+			return 1;
+		}
+		seen[b] = 1;
+		bmblk[k] = b;
+		if (blocksum(blk(b), 0) != rd32(blk(b)))
+			err("bitmap block %u: checksum bad", b);
 	}
-	seen[b] = 1;
-	bm = blk(b);
-	if (blocksum(bm, 0) != rd32(bm))
-		err("bitmap block: checksum bad");
 
-	walk_dir(ROOT, "", 0);
+	walk_dir(root_blk, "", 0);
 
-	for (b = 2; b < NBLOCKS; b++) {
-		uint32_t idx = b - 2;
-		int isfree = (rd32(bm + 4 + idx / 32 * 4) >> (idx % 32)) & 1;
+	for (b = 2; b < nblocks; b++) {
+		uint32_t idx = b - 2, j = idx % BM_BITS;
+		int isfree;
+
+		bm = blk(bmblk[idx / BM_BITS]);
+		isfree = (rd32(bm + 4 + j / 32 * 4) >> (j % 32)) & 1;
 
 		nfree += isfree;
 		if (seen[b] && isfree)
@@ -724,15 +771,16 @@ verify(const char *path)
 
 	p = disk + PVBB_OFFSET;
 	have_pvbb = rd32(p + PVBB_O_MAGIC) == PVBB_MAGIC;
-	if (!have_pvbb)
-		err("no PVBB area: not a pvmk boot disk");
-	else {
+	if (!have_pvbb) {
+		if (verbose)
+			printf("no PVBB area (plain volume, not a pvmk boot disk)\n");
+	} else {
 		uint32_t start = rd32(p + PVBB_O_START);
 		uint32_t n = rd32(p + PVBB_O_NBLOCKS);
 		uint32_t size = rd32(p + PVBB_O_SIZE);
 		uint32_t crc = rd32(p + PVBB_O_CRC);
 
-		if (start < 2 || start + n > NBLOCKS || size > n * BSIZE ||
+		if (start < 2 || start + n > nblocks || size > n * BSIZE ||
 		    n * BSIZE - size >= BSIZE)
 			err("PVBB: bad range start %u n %u size %u", start, n,
 			    size);
@@ -769,9 +817,9 @@ static void
 usage(void)
 {
 	fprintf(stderr,
-	    "usage: mkadf -o out.adf -b bootblock.bin [-i pvmk.bin] [-n VOLUME]\n"
-	    "             [--baud N] [-f dest=src]...\n"
-	    "       mkadf --verify image.adf [-q]\n");
+	    "usage: mkadf -o out.adf [-b bootblock.bin] [-i pvmk.bin] [-n VOLUME]\n"
+	    "             [--blocks N] [--baud N] [-f dest=src]...\n"
+	    "       mkadf --verify image [-q]\n");
 	exit(2);
 }
 
@@ -781,7 +829,7 @@ main(int argc, char **argv)
 	const char *out = NULL, *boot = NULL, *img = NULL, *vol = "PVMK";
 	const char *check = NULL;
 	char **files = calloc((size_t)argc, sizeof(char *));
-	uint32_t baud = 115200;
+	uint32_t baud = 115200, blocks = ADF_BLOCKS;
 	int i, nfiles = 0;
 
 	for (i = 1; i < argc; i++) {
@@ -800,6 +848,8 @@ main(int argc, char **argv)
 			img = argv[++i];
 		else if (!strcmp(a, "-n"))
 			vol = argv[++i];
+		else if (!strcmp(a, "--blocks"))
+			blocks = (uint32_t)strtoul(argv[++i], NULL, 0);
 		else if (!strcmp(a, "--baud"))
 			baud = (uint32_t)strtoul(argv[++i], NULL, 0);
 		else if (!strcmp(a, "-f"))
@@ -811,7 +861,8 @@ main(int argc, char **argv)
 	}
 	if (check)
 		return verify(check);
-	if (!out || !boot)
+	if (!out || (img && !boot))
 		usage();
+	geometry(blocks);
 	return build(out, boot, img, vol, baud, nfiles, files);
 }

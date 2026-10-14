@@ -11,6 +11,7 @@
  */
 #include "pvmk/amiga.h"
 #include "pvmk/bootcap.h"
+#include "pvmk/bootreq.h"
 #include "pvmk/conf.h"
 #include "pvmk/display.h"
 #include "pvmk/ffs.h"
@@ -20,6 +21,8 @@
 #include "pvmk/log.h"
 #include "pvmk/mk.h"
 #include "pvmk/paula.h"
+#include "pvmk/rdb.h"
+#include "pvmk/scsi.h"
 #include "pvmk/version.h"
 
 #define LVO_AllocAbs		(-204)
@@ -135,11 +138,12 @@ show_capture(void)
 	    bc->vblank == 50 ? "PAL" : "NTSC", bc->vblank, bc->eclock,
 	    bc->attn);
 	for (i = 0; i < bc->nmem; i++)
-		kprintf("stage0: mem %08x-%08x %6uK %s\n", bc->mem[i].lower,
-		    bc->mem[i].upper - 1,
+		kprintf("stage0: mem %08x-%08x %6uK %s (attributes %04x)\n",
+		    bc->mem[i].lower, bc->mem[i].upper - 1,
 		    (bc->mem[i].upper - bc->mem[i].lower) >> 10,
 		    bc->mem[i].attr & MEMF_CHIP ? "chip" :
-		    bc->mem[i].attr & MEMF_FAST ? "fast" : "other");
+		    bc->mem[i].attr & MEMF_FAST ? "fast" : "other",
+		    bc->mem[i].attr);
 	kprintf("stage0: %u expansion board(s)\n", bc->ncd);
 	for (i = 0; i < bc->ncd; i++) {
 		const u8 *c = bc->configdev[i];
@@ -174,8 +178,9 @@ reserve_hole(void *sysbase, u8 *base, u32 alloc)
 	if (hb >= bc->mem[best].lower &&
 	    (hb >= (u32)(uintptr_t)base + alloc || top <= (u32)(uintptr_t)base) &&
 	    lib_call(sysbase, LVO_AllocAbs, HOLE_SIZE, 0, 0, hb) == hb) {
-		bc->hole_base = hb;
+		bc->hole_base = bc->hole_alloc = hb;
 		bc->hole_top = top;
+		bc->hole_alloc_size = HOLE_SIZE;
 		return 0;
 	}
 	r = lib_call(sysbase, LVO_AllocMem, HOLE_SIZE + 4096,
@@ -185,6 +190,8 @@ reserve_hole(void *sysbase, u8 *base, u32 alloc)
 		    HOLE_SIZE >> 10);
 		return -1;
 	}
+	bc->hole_alloc = r;
+	bc->hole_alloc_size = HOLE_SIZE + 4096;
 	bc->hole_base = (r + 4095) & ~0xfffu;
 	bc->hole_top = bc->hole_base + HOLE_SIZE;
 	kprintf("stage0: top of fast RAM busy, using %08x (previous-boot log "
@@ -243,6 +250,237 @@ capture_font(void *sysbase)
 	if (tf)
 		lib_call(gfx, LVO_CloseFont, 0, 0, 0, (u32)(uintptr_t)tf);
 	lib_call(sysbase, LVO_CloseLibrary, 0, 0, 0, (u32)(uintptr_t)gfx);
+}
+
+/* expansion.library: ExpansionBase->MountList of struct BootNode */
+#define EB_MOUNTLIST		0x4a
+#define BN_DEVICENODE		16
+#define DN_NAME			40	/* BSTR */
+
+static void
+bootnode_name(u8 *bn, char *buf, u32 size)
+{
+	u8 *dn = (u8 *)PEEK32(bn, BN_DEVICENODE);
+	u8 *name = dn ? (u8 *)(PEEK32(dn, DN_NAME) << 2) : NULL;
+	u32 n = name ? name[0] : 0, i;
+
+	for (i = 0; i < n && i < size - 1; i++)
+		buf[i] = (char)name[1 + i];
+	buf[i] = 0;
+}
+
+static int
+name_eq(const char *a, const char *b)
+{
+	for (; *a && *b; a++, b++)
+		if ((*a | 0x20) != (*b | 0x20))
+			return 0;
+	return *a == *b;
+}
+
+/*
+ * Record and list Kickstart's boot nodes (want == NULL), or check that a
+ * boot node of that name exists (returns 0 if found or not asked).
+ */
+static int
+bootnodes(void *sysbase, const char *want)
+{
+	u8 *exp, *bn, *found = NULL;
+	char buf[32];
+
+	exp = (u8 *)lib_call(sysbase, LVO_OpenLibrary, 0, 0, 0,
+	    (u32)(uintptr_t)"expansion.library");
+	if (!exp)
+		return -1;
+	for (bn = (u8 *)PEEK32(exp, EB_MOUNTLIST); PEEK32(bn, 0);
+	    bn = (u8 *)PEEK32(bn, 0)) {
+		bootnode_name(bn, buf, sizeof(buf));
+		if (want && name_eq(buf, want))
+			found = bn;
+		else if (!want) {
+			kprintf("stage0: boot node %s pri %d\n", buf,
+			    (int)(s8)PEEK8(bn, 9));
+			if (bootcap.nbootnodes < BC_MAXBOOTNODES) {
+				struct bc_bootnode *b =
+				    &bootcap.bootnodes[bootcap.nbootnodes++];
+
+				memcpy(b->name, buf, sizeof(b->name));
+				b->name[sizeof(b->name) - 1] = 0;
+				b->pri = (s8)PEEK8(bn, 9);
+			}
+		}
+	}
+	lib_call(sysbase, LVO_CloseLibrary, 0, 0, 0, (u32)(uintptr_t)exp);
+	return want && !found ? -1 : 0;
+}
+
+/*
+ * Partitions through Kickstart's own disk drivers, so any controller
+ * Kickstart can boot from is listed (A3000 SCSI, accelerator or Zorro
+ * controllers, emulated HDFs, IDE...). Drivers and units come from the boot
+ * nodes' FileSysStartupMsg; units 0-7 of each driver are tried as well, to
+ * find disks without mounted partitions (AMIX-only disks, for example).
+ */
+#define LVO_OpenDevice		(-444)
+#define LVO_CloseDevice		(-450)
+#define LVO_CreateIORequest	(-654)
+#define LVO_DeleteIORequest	(-660)
+#define LVO_CreateMsgPort	(-666)
+#define LVO_DeleteMsgPort	(-672)
+#define DN_STARTUP		28	/* BPTR to struct FileSysStartupMsg */
+#define FSSM_UNIT		0
+#define FSSM_DEVICE		4	/* BSTR */
+#define TD_READ64		24
+#define IOSTD_SIZE		48
+
+struct romdisk {
+	void *sysbase;
+	u8 *io;
+	u8 *buf;			/* chip RAM: reachable by any DMA */
+};
+
+static int
+rom_read(void *ctx, u32 blk, void *buf)
+{
+	struct romdisk *r = ctx;
+
+	PEEK16(r->io, IO_COMMAND) = blk >= 0x800000 ? TD_READ64 : CMD_READ;
+	PEEK32(r->io, IO_ACTUAL) = blk >> 23;		/* TD_READ64: high 32 */
+	PEEK32(r->io, IO_OFFSET) = blk << 9;
+	PEEK32(r->io, IO_LENGTH) = 512;
+	PEEK32(r->io, IO_DATA) = (u32)(uintptr_t)r->buf;
+	lib_call(r->sysbase, LVO_DoIO, 0, 0, 0, (u32)(uintptr_t)r->io);
+	if (PEEK8(r->io, IO_ERROR))
+		return -1;
+	memcpy(buf, r->buf, 512);
+	return 0;
+}
+
+struct devunit {
+	char name[24];
+	u32 unit;
+};
+
+/* trackdisk (floppies) and carddisk (PCMCIA) have no RDB */
+static int
+strcmp_trackdisk(const char *name)
+{
+	const char *a = "trackdisk.device", *b = "carddisk.device", *n;
+
+	for (n = name; *a && *n == *a; n++, a++)
+		;
+	if (!*a && !*n)
+		return 0;
+	for (n = name; *b && *n == *b; n++, b++)
+		;
+	return *b || *n;
+}
+
+static u32
+add_devunit(struct devunit *du, u32 n, const char *name, u32 unit)
+{
+	u32 i, k;
+
+	for (i = 0; i < n; i++) {
+		for (k = 0; name[k] && name[k] == du[i].name[k]; k++)
+			;
+		if (!name[k] && !du[i].name[k] && du[i].unit == unit)
+			return n;
+	}
+	if (n == 32)
+		return n;
+	for (k = 0; name[k] && k < sizeof(du[n].name) - 1; k++)
+		du[n].name[k] = name[k];
+	du[n].name[k] = 0;
+	du[n].unit = unit;
+	return n + 1;
+}
+
+static void
+rom_scan(void *sysbase)
+{
+	static struct devunit du[32];
+	struct romdisk r = { sysbase, NULL, (u8 *)bootcap.scsi_chip };
+	u8 *exp, *bn, *port;
+	u32 n = 0, i, ndev, u;
+
+	if (!r.buf)
+		return;
+	exp = (u8 *)lib_call(sysbase, LVO_OpenLibrary, 0, 0, 0,
+	    (u32)(uintptr_t)"expansion.library");
+	if (!exp)
+		return;
+	for (bn = (u8 *)PEEK32(exp, EB_MOUNTLIST); PEEK32(bn, 0);
+	    bn = (u8 *)PEEK32(bn, 0)) {
+		u8 *dn = (u8 *)PEEK32(bn, BN_DEVICENODE), *fssm, *bs;
+		char name[24];
+		u32 len;
+
+		if (!dn || PEEK32(dn, DN_STARTUP) < 0x100)
+			continue;
+		fssm = (u8 *)(PEEK32(dn, DN_STARTUP) << 2);
+		bs = (u8 *)(PEEK32(fssm, FSSM_DEVICE) << 2);
+		if (!bs)
+			continue;
+		for (len = 0; len < bs[0] && len < sizeof(name) - 1 &&
+		    bs[1 + len]; len++)
+			name[len] = (char)bs[1 + len];
+		name[len] = 0;
+		if (!len || !strcmp_trackdisk(name))
+			continue;
+		n = add_devunit(du, n, name, PEEK32(fssm, FSSM_UNIT));
+	}
+	lib_call(sysbase, LVO_CloseLibrary, 0, 0, 0, (u32)(uintptr_t)exp);
+
+	ndev = n;			/* also probe units 0-7 of each driver */
+	for (i = 0; i < ndev; i++)
+		for (u = 0; u < 8; u++)
+			n = add_devunit(du, n, du[i].name, u);
+
+	port = (u8 *)lib_call(sysbase, LVO_CreateMsgPort, 0, 0, 0, 0);
+	r.io = port ? (u8 *)lib_call(sysbase, LVO_CreateIORequest, IOSTD_SIZE, 0,
+	    (u32)(uintptr_t)port, 0) : NULL;
+	for (i = 0; r.io && i < n; i++) {
+		int found;
+
+		if (lib_call(sysbase, LVO_OpenDevice, du[i].unit, 0,
+		    (u32)(uintptr_t)du[i].name, (u32)(uintptr_t)r.io) & 0xff)
+			continue;
+		found = rdb_parse(rom_read, &r, du[i].name, du[i].unit, -1);
+		kprintf("stage0: %s unit %u: %s", du[i].name, du[i].unit,
+		    found < 0 ? "no RDB\n" : "");
+		if (found >= 0)
+			kprintf("%d partition(s)\n", found);
+		lib_call(sysbase, LVO_CloseDevice, 0, 0, 0, (u32)(uintptr_t)r.io);
+	}
+	if (r.io)
+		lib_call(sysbase, LVO_DeleteIORequest, 0, 0, (u32)(uintptr_t)r.io, 0);
+	if (port)
+		lib_call(sysbase, LVO_DeleteMsgPort, 0, 0, (u32)(uintptr_t)port, 0);
+}
+
+/*
+ * Booting another device: strap tries the boot nodes in priority order and,
+ * when a boot block declines (returns an error), goes on with the next one
+ * in its own order (reordering the list at this point has no effect). So
+ * the floppy declines once and strap boots the next bootable device, which
+ * the shell has checked is the one requested; nothing is left in memory.
+ */
+static void
+decline_boot(void *sysbase, void *ioreq, const char *name)
+{
+	PEEK16(ioreq, IO_COMMAND) = TD_MOTOR;
+	PEEK32(ioreq, IO_LENGTH) = 0;
+	lib_call(sysbase, LVO_DoIO, 0, 0, 0, (u32)(uintptr_t)ioreq);
+	if (bootcap.scsi_chip)
+		lib_call(sysbase, LVO_FreeMem, SCSI_DMA_BLOCKS * 512, 0, 0,
+		    bootcap.scsi_chip);
+	lib_call(sysbase, LVO_FreeMem, bootcap.hole_alloc_size, 0, 0,
+	    bootcap.hole_alloc);
+	kprintf("stage0: declining to boot from the floppy; strap continues "
+	    "with the next boot device (%s is requested)\n", name);
+	while (!(REG16(SERDATR) & (1 << SERDATR_TSRE)))
+		;
 }
 
 struct dirwalk {
@@ -360,6 +598,25 @@ stage0_main(void *sysbase, void *ioreq, u32 medium, u32 baud, u8 *base)
 	    medium == BOOT_HARDDISK ? "hard disk" : "unknown",
 	    base, bss_end, nrel);
 	show_capture();
+	bootnodes(sysbase, NULL);
+	bootcap.scsi_chip = lib_call(sysbase, LVO_AllocMem, SCSI_DMA_BLOCKS * 512,
+	    MEMF_CHIP | MEMF_PUBLIC, 0, 0);
+
+	{
+		char name[32];
+
+		if (bootreq_take(bootcap.hole_top - LOG_AREA_SIZE, name) ==
+		    BOOTREQ_AMIGAOS) {
+			kprintf("stage0: boot request: AmigaOS from %s\n", name);
+			if (bootnodes(sysbase, name) == 0 && medium == BOOT_FLOPPY) {
+				decline_boot(sysbase, ioreq, name);
+				return BOOTBLOCK_DECLINE;
+			}
+			kprintf("stage0: cannot boot %s, staying in "
+			    SORIX_NAME "\n", name);
+		}
+	}
+	rom_scan(sysbase);
 	kprintf("stage0: hole %08x-%08x (%uK)\n", bootcap.hole_base,
 	    bootcap.hole_top - 1, HOLE_SIZE >> 10);
 

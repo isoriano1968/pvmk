@@ -11,6 +11,7 @@
 #define BC_MAXCD	16		/* NAUTO in AMIX bootinfo.h */
 #define BC_MAXFILES	48
 #define CONFIGDEV_SIZE	0x44		/* struct ConfigDev */
+#define BC_MAXBOOTNODES	16
 
 struct memregion {
 	u32 lower, upper;		/* [lower, upper) */
@@ -21,6 +22,11 @@ struct bc_file {
 	char path[40];
 	u32 size;
 	u8 is_dir;
+};
+
+struct bc_bootnode {
+	char name[24];
+	s8 pri;
 };
 
 struct conf {
@@ -48,14 +54,18 @@ struct bootcap {
 	u8 configdev[BC_MAXCD][CONFIGDEV_SIZE];
 	u32 nfiles;
 	struct bc_file files[BC_MAXFILES];
+	u32 nbootnodes;			/* Kickstart's boot list, in order */
+	struct bc_bootnode bootnodes[BC_MAXBOOTNODES];
 
 	int conf_loaded;
 	struct conf conf;
 
 	u32 hole_base, hole_top;
+	u32 hole_alloc, hole_alloc_size;	/* as allocated from exec */
 	u32 image_base, image_size;	/* after takeover */
 
 	u32 disp_chip;			/* chip RAM for the text display, or 0 */
+	u32 scsi_chip;			/* chip RAM SCSI DMA bounce buffer, or 0 */
 	int font_ok;
 	u8 font[96 * 8];		/* topaz 8 from Kickstart, ' '..DEL */
 };

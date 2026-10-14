@@ -40,12 +40,13 @@ BUDGET_IMAGE	 := 32768
 PVMK_OBJS	:= $(B)/stage0/entry.o $(B)/stage0/stage0.o $(B)/stage0/libcall.o \
 		   $(B)/stage0/takeover.o $(B)/core/stage1.o $(B)/core/vectors.o \
 		   $(B)/core/exc.o $(B)/cpu/cpu.o $(B)/cpu/probe.o \
-		   $(B)/drv/paula.o $(B)/drv/display.o $(B)/drv/keyboard.o $(B)/svc/kprintf.o $(B)/svc/log.o \
-		   $(B)/svc/ffs.o $(B)/svc/conf.o $(B)/svc/shell.o $(B)/svc/crc32.o
+		   $(B)/drv/paula.o $(B)/drv/display.o $(B)/drv/keyboard.o $(B)/drv/wd33c93.o $(B)/svc/kprintf.o $(B)/svc/log.o \
+		   $(B)/svc/ffs.o $(B)/svc/conf.o $(B)/svc/shell.o $(B)/svc/crc32.o \
+		   $(B)/svc/disk.o $(B)/svc/rdb.o $(B)/svc/bootreq.o
 
 ADF_FILES	:= -f pvmk.conf=conf/pvmk.conf -f README=conf/README.disk
 
-.PHONY: all adf check check-insns size-check verify run test toolchain clean
+.PHONY: all adf hdf check check-insns size-check verify run test toolchain clean
 all: adf verify
 
 adf: $(B)/pvmk.adf
@@ -79,6 +80,20 @@ $(B)/host/%: host/%.c include/pvmk/image.h
 $(B)/pvmk.adf: $(B)/bootblock.bin $(B)/pvmk.bin $(B)/host/mkadf conf/pvmk.conf conf/README.disk
 	$(B)/host/mkadf -o $@ -b $(B)/bootblock.bin -i $(B)/pvmk.bin -n PVMK $(ADF_FILES)
 
+# Test hard disk for FS-UAE: RDB with a bootable FFS DH0, an FFS WORK and an
+# AMIX-type UNIX partition.
+$(B)/test-dh0.img: test/startup-sequence $(B)/host/mkadf
+	$(B)/host/mkadf -q -o $@ --blocks 8192 -n TestDH0 -f s/startup-sequence=$<
+
+$(B)/test-work.img: test/work-startup-sequence $(B)/host/mkadf
+	$(B)/host/mkadf -q -o $@ --blocks 2048 -n TestWork -f s/startup-sequence=$<
+
+$(B)/test.hdf: $(B)/test-dh0.img $(B)/test-work.img $(B)/host/mkhdf
+	$(B)/host/mkhdf -o $@ -p DH0,image=$(B)/test-dh0.img,pri=0 \
+		-p WORK,image=$(B)/test-work.img,pri=-5 -p UNIX,size=1M,dostype=0x554e4901
+
+hdf: $(B)/test.hdf
+
 verify: $(B)/pvmk.adf
 	$(B)/host/mkadf --verify $<
 
@@ -97,11 +112,16 @@ check: check-insns size-check verify
 
 UAE_CPU		?= 030
 UAE_CPUS	?= 030 040 060
-run: $(B)/pvmk.adf
-	$(PYTHON) -I host/uae.py run --cpu $(UAE_CPU) --adf $(B)/pvmk.adf
+UAE_HDF		?= $(B)/test.hdf
+run: $(B)/pvmk.adf $(UAE_HDF)
+	$(PYTHON) -I host/uae.py run --cpu $(UAE_CPU) --adf $(B)/pvmk.adf \
+		$(if $(UAE_HDF),--hdf $(UAE_HDF))
 
-test: $(B)/pvmk.adf
-	$(PYTHON) -I host/uae.py test --cpu $(UAE_CPUS) --adf $(B)/pvmk.adf
+test: $(B)/pvmk.adf $(B)/test.hdf
+	$(PYTHON) -I host/uae.py test --cpu $(UAE_CPUS) --adf $(B)/pvmk.adf \
+		--hdf $(B)/test.hdf
+	$(PYTHON) -I host/uae.py test --cpu 030 --adf $(B)/pvmk.adf \
+		--hdf $(B)/test.hdf --hdf-ctrl uae
 
 toolchain:
 	host/get-toolchain.sh $(TOOLCHAIN_DIR)

@@ -10,6 +10,8 @@
 #include "pvmk/layout.h"
 #include "pvmk/log.h"
 #include "pvmk/mk.h"
+#include "pvmk/rdb.h"
+#include "pvmk/scsi.h"
 #include "pvmk/version.h"
 
 static u32 vectors[256];
@@ -45,5 +47,14 @@ stage1_main(void *arg)
 	    sstack_top(), bc->hole_top - 1);
 	cpu_probe();
 	cpu_show();
+	scsi_dma_buffer(bc->scsi_chip, SCSI_DMA_BLOCKS * 512);
+	if (scsi_init() == SCSI_OK) {
+		kprintf("scsi: A3000 internal SCSI (WD33C93A), host ID %u\n",
+		    SCSI_HOST_ID);
+		disk_scan(1);
+		rdb_scan(0);
+		part_show();
+	} else
+		kprintf("scsi: no controller found\n");
 	shell_main();
 }

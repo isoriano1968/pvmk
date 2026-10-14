@@ -30,6 +30,9 @@
 #define BOOT_FLOPPY	1
 #define BOOT_HARDDISK	2
 
+/* Image return values to the boot block (besides 0 = boot AmigaOS here) */
+#define BOOTBLOCK_DECLINE 2		/* let strap boot the next device */
+
 /*
  * PVMK image header, at offset 0 of the pvmk image (stage0/entry.S).
  * The image is linked at address 0 and carries its own relocation table.

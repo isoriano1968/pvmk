@@ -25,6 +25,7 @@ make check      # 68060-safe instruction check, size budget, ADF verify
 make test       # FS-UAE A3000 with 68030/040/060: boot, shell commands, reset, logs
 make run        # boot in FS-UAE with the serial console in this terminal (Ctrl-] quits)
 make run UAE_CPU=060
+make run UAE_HDF=                # without the test hard disk
 host/pvterm /dev/ttyUSB0          # real A3000, 115200 8N1
 ```
 
@@ -68,16 +69,29 @@ AmigaOS from the same disk.
 
 ```
 SORIX-LDOM> help
-  ver  cpu  mem  conf  ls        system information
+  ver  cpu  mem  conf            system information
+  scsi                           rescan the A3000 internal SCSI bus
+  part                           list RDB partitions (all disks, all controllers)
+  ls [dh0:path]                  floppy directory, or an AmigaDOS partition's
+                                 (partitions on the A3000 internal SCSI)
   md <addr> [len]                memory dump
   mw[.b|.w|.l] <addr> <value>    memory write
   sload <addr> <len>             receive raw bytes over serial
   go <addr>                      call code, print D0
   regs                           registers of the last exception
   dmesg [-p]                     boot log, or the previous boot's
-  boot [personality]             (M2)
+  boot <partition>               AmigaOS partition: reboot into it (below);
+                                 AMIX partitions: M2
   reset                          reboot into Kickstart
 ```
+
+`boot dh0` leaves a one-shot request in the RAM that survives a reset and
+reboots. stage0 picks it up while Kickstart is alive, frees its memory and
+makes the floppy's boot block decline; strap then goes on with the next
+boot device in priority order, so Kickstart boots DH0 its normal way even
+with the SORIX-LDOM floppy in DF0. Strap keeps its own order at that point,
+so only the highest-priority bootable device after the floppy can be chosen
+this way; `boot` says so for any other partition.
 
 Numbers are hexadecimal; prefix `#` for decimal. Faults (bus error,
 illegal instruction, ...) print a register dump and return to the shell.
@@ -88,7 +102,16 @@ The boot log survives a warm reset: `dmesg -p` shows the previous boot.
 - M0 (toolchain, boot floppy, serial output): done.
 - M1 boot monitor, floppy part: done and tested in FS-UAE on 68030, 68040
   and 68060. Not yet tried on real hardware.
-- M1 hard disk part (RDB `PVMK` partition, `pvinstall`): next.
+- Disks and partitions: stage0 reads the RDB of every disk through
+  Kickstart's own drivers (whatever controller Kickstart boots from:
+  A3000 SCSI, accelerator or Zorro controllers, emulated HDFs), so `part`
+  and `boot` work for all of them. After takeover, a native driver for the
+  A3000 internal SCSI (WD33C93A/SDMAC, polled, DMA through a chip RAM
+  bounce buffer) also gives `ls`. Tested in FS-UAE on the internal SCSI and
+  on UAE's own controller (`make test`, `build/test.hdf` from
+  `host/mkhdf`).
+- M1 hard disk boot of SORIX-LDOM itself (RDB `PVMK` partition,
+  `pvinstall`): next.
 
 ## Layout
 
@@ -103,7 +126,7 @@ The boot log survives a warm reset: `dmesg -p` shows the previous boot.
 | `svc/` | Shell, log, GDB stub, ELF helpers |
 | `ld/` | Personality loaders (AMIX, PVPI, Kickstart, raw) |
 | `guest/pvtest/` | Bare-metal vCPU conformance test guest |
-| `host/` | `mkimage`, `mkadf`, `uae.py` (FS-UAE run/test), `pvterm`, toolchain fetch |
+| `host/` | `mkimage`, `mkadf` (FFS volumes), `mkhdf` (RDB disks), `uae.py` (FS-UAE run/test), `pvterm`, toolchain fetch |
 | `tools/` | AmigaOS-side tools (`pvinstall`) |
 | `conf/` | Default `pvmk.conf` placed on the boot floppy |
 | `include/pvmk/` | Public headers (hypercall ABI) shared with guests |

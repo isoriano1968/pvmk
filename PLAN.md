@@ -18,9 +18,13 @@ tracing goes over the serial port, with a GDB remote stub.
 1. **Small**: resident core ≤ 32 KB code, shell + drivers + debug ≤ 32 KB,
    optional 040/060 support packages loaded only when needed. Total resident
    RAM reservation ≤ 256 KB (incl. shadow page tables, log ring, stacks).
-2. **CPUs**: 68030 (+68881/68882), 68040, 68060 (incl. 68LC040/68EC060
-   variants detected and refused or degraded gracefully). One binary, runtime
-   CPU dispatch.
+2. **CPUs**: 68030 (+68881/68882), 68040, 68060, and the FPU-less
+   68LC040/68LC060. One binary, runtime CPU dispatch. **A working MMU is a
+   hard requirement**; SORIX-LDOM does not emulate one. CPUs without an MMU
+   (68EC030, 68EC040, 68EC060) and accelerator modes that do not provide one
+   can run the boot monitor (M1/M2) but cannot run guests (M3+). The CPU
+   probe verifies the MMU with a self-test (map a page, translate it, fault
+   on an unmapped one) and reports it.
 3. **Boot shell** on serial (and optional minimal screen) that lists RDB
    partitions and loads a personality boot loader from any of them, with an
    autoboot default + timeout.
@@ -42,6 +46,22 @@ tracing goes over the serial port, with a GDB remote stub.
   and SDMAC have no clean sharing story; v1 runs **one active personality**
   with pvmk underneath. Concurrency is a stretch milestone (M8).
 - SMP, Zorro III bus-master isolation (no IOMMU exists), 68020/68851.
+- MMU emulation (see goal 2).
+
+### What SORIX-LDOM is at each stage
+- **M0–M2: a boot monitor and boot loader.** It owns the machine only until
+  it hands over. `boot dh0` reboots into Kickstart; `boot -native` gives AMIX
+  the whole machine (vectors, supervisor mode). After that SORIX-LDOM is no
+  longer in control and there is no way back except a reset. `boot -native`
+  stays as a fallback, not as the goal.
+- **M3+: a microkernel with paravirtualized guests.** The guest runs in user
+  mode; SORIX-LDOM keeps supervisor mode, its own vector table and the MMU.
+  Like a service processor (Sun ILOM), it can always be entered while a guest
+  runs: a break-in (keyboard combination, Ctrl-C on serial, level 7
+  interrupt) stops the guest and opens the SORIX-LDOM shell, where its
+  registers, memory and the logs can be inspected; `resume` continues the
+  guest exactly where it stopped. The guest cannot change VBR, mask the
+  level 7 interrupt or switch the MMU off: those instructions trap.
 
 ---
 
@@ -253,8 +273,11 @@ works when pvmk is loaded without Kickstart. Revision and FPU presence
 |---|---|---|
 | Paula UART (`SERDAT/SERDATR/SERPER`) | debug console, shell, GDB | `SERPER = clock/baud − 1` (PAL 3 546 895 Hz, NTSC 3 579 545 Hz); default 115200 (≈ −0.7 % PAL), fallback 9600/19200 |
 | CIA-B timer A | timeouts, autoboot countdown, log timestamps | E-clock based |
-| WD33C93A + SDMAC | read boot partitions | polled PIO first, DMA later; read-only |
-| RDB parser | partition table | reuse field layout from `amiga/alien/rdb.h` |
+| Disk driver layer | partitions, kernels, `ls`/`cat` | several native drivers side by side, each probing for its own hardware; partitions record which driver reaches them |
+| A3000 internal SCSI (WD33C93A + SDMAC) | native disk driver | polled, DMA through a chip RAM bounce buffer; read-only. Kept unconditionally (also emulated by the Z3660-amix firmware) |
+| Z3660 piscsi mailbox | native disk driver | used only if the AutoConfig board `0x144B:0x01` is present; synchronous MMIO mailbox (unit, block, length, buffer address, then the read register), no interrupts |
+| Kickstart's drivers (stage0) | any other controller | before takeover only: RDB, partition list, kernel loading |
+| RDB parser | partition table | `devices/hardblocks.h` layout, over any block reader |
 | `COLOR00` progress codes | headless diagnosis | distinct colour per boot stage, like Kickstart |
 | Later: A4091 (NCR 53C710), A2091 | extra disks | M6+ |
 
@@ -291,12 +314,42 @@ image_crc32 | n_segments | segment table | cmdline[128]
 ```
 
 ### 7.2 AMIX loader (`ld-amix`)
-1. Read partition block 2 (offset `0x400`) boot2 info block → size of boot2;
-   skip boot2 entirely.
-2. Read kernel info block → ELF size, checksum, preferred load address;
-   verify checksum (`boot/chksum.c` algorithm).
-3. Load ELF; if relocatable (`relocunix`), relocate to the chosen address
-   (logic from `boot/elf2brel.c` / `bind.c`).
+The kernel is loaded from the **AMIX root file system (UFS)** at a path the
+user gives; the AMIX boot partition is the fallback.
+
+```
+boot unix                     # default path /stand/unix on partition UNIX
+boot unix:/stand/unix.test    # any path on the root partition
+boot dh1:/stand/unix          # any UFS partition, any path
+boot -native unix:/stand/unix # M2: hand the machine to AMIX entirely
+```
+`default=` in `pvmk.conf` takes the same syntax (e.g. `default=unix:/stand/unix`).
+
+**I/O path.** After takeover only the A3000 internal SCSI has a native
+driver, while disks on other controllers (Z3660 HDFs, Zorro cards) are only
+reachable through Kickstart's drivers. So a kernel boot is a boot request,
+like `boot dh0`: the shell records `{partition, path, options}` in the
+reset-surviving log area and reboots; stage0 reads the kernel through
+Kickstart's driver for that partition (any controller) before takeover. If
+the partition is on the internal SCSI, the shell may instead read it
+directly with the native driver and skip the reboot.
+
+**UFS reader** (`svc/ufs.c`, read-only, about 600–800 lines, same block
+callback interface as the FFS reader): superblock at byte 8192 (magic
+`0x011954`), cylinder group geometry, inodes (12 direct, single/double/
+triple indirect blocks), directories, symbolic links (fast and slow, with a
+loop limit), big-endian as written by AMIX. The shell gets `ls` and `cat` on
+UFS partitions to check a kernel before booting it. `s5` is only detected
+and reported (AMIX root is UFS).
+
+Loader steps:
+1. Locate the kernel: UFS path lookup (or, fallback, the AMIX boot
+   partition: boot2 info block at offset `0x400` → skip boot2 → kernel info
+   block with ELF size, checksum and load address, `boot/chksum.c`).
+2. Read the ELF (`/stand/unix` is a relocatable ELF of about 1 MB) into
+   memory reserved at stage0.
+3. Relocate it to the chosen address (logic from `boot/elf2brel.c` /
+   `bind.c`).
 4. Apply **PV patch table** (§7.3).
 5. Build `struct bootinfo`: `autocon[]` from the `ConfigDev` list captured
    from Kickstart at pvmk stage0 (§8), `memory[]` = real memory minus pvmk
@@ -625,16 +678,24 @@ Size budget (enforced by a `make size-check` target):
 |---|---|---|
 | **M0** | Toolchain (m68k-elf), WinUAE A3000 configs (030/040/060), `pvterm`, Makefile, size check, `mkadf` + `bootblock.s` | `make adf` produces `pvmk.adf` that passes `mkadf --verify`; booting it in WinUAE prints "hello" on serial |
 | **M1** | Boot monitor: **floppy boot first** (bootblock, read-only FFS, `pvmk.conf`), stage0 capture, takeover, serial log, `COLOR00` codes, shell (`md/mw/regs/cpu/dmesg/ls`), `sload/go`; then the same boot block on an RDB `PVMK` partition + `pvinstall` | Real A3000/030 boots to `pvmk>` from a physical floppy written from `pvmk.adf`, then from HD; boot log + previous-boot log readable |
-| **M2** | WD33C93/SDMAC polled driver, RDB, `part/probe`, `ld-amix` + bootinfo synthesis, `boot -native` | Unmodified AMIX boots multi-user via pvmk **natively** (pvmk replaces boot2) on 030 |
-| **M3** | vCPU core: emulation of all §4.3 instructions (030), reflection, `pvtest` conformance guest (shipped on the ADF under `personalities/`), GDB stub | `pvtest` passes 100 % on 030 (WinUAE + real HW), booted entirely from floppy; GDB can step pvtest |
-| **M4** | vMMU 030 shadow, IRQ virtualization, hypercalls, AMIX PV patches (`pvcons`, idle, reboot, detection) | AMIX boots **single-user deprivileged** on 030; same kernel still boots native |
+| **M2** | Read-only UFS reader, `ls`/`cat` on UFS, kernel boot request with a free path (`boot unix:/stand/unix`), kernel read through Kickstart's driver at stage0 (any controller) or natively, `ld-amix` relocation + bootinfo synthesis, `boot -native` (SCSI driver, RDB and `part` were done early, in M1) | Unmodified AMIX boots multi-user via SORIX-LDOM **natively** from `/stand/unix` on its UFS root, on 030, from the internal SCSI and from a Z3660 HDF |
+| **M3** | vCPU core: emulation of all §4.3 instructions (030), reflection, `pvtest` conformance guest (shipped on the ADF under `personalities/`), **break-in and `resume`**, GDB stub, MMU self-test | `pvtest` passes 100 % on 030 (WinUAE + real HW), booted entirely from floppy; a break-in while `pvtest` runs opens the SORIX-LDOM shell and `resume` continues it; GDB can step pvtest |
+| **M4** | vMMU 030 shadow, IRQ virtualization, hypercalls, AMIX PV patches (`pvcons`, idle, reboot, detection) | AMIX boots **single-user deprivileged** on 030; a break-in into running AMIX and `resume` work; same kernel still boots native |
 | **M5** | Stability + performance: multi-user, SCSI/network under load, stats, optional spl patching | AMIX multi-user; kernel build of a driver completes; overhead measured & documented |
 | **M6** | 040 then 060 back-ends, FPSP/ISP modules, 040/060 shadow MMU | M3–M5 acceptance repeated on A3640 (040) and an 060 card |
 | **M7** | `ld-kick`: Kickstart 3.1 personality, pass-through custom chips | Workbench boots under pvmk; `ColdReboot` returns to shell |
 | **M8** (stretch) | Concurrent personalities with device partitioning (e.g., AMIX headless on serial+SCSI, AmigaOS on display) | Proof of concept only |
 
 M1 + M2 alone already give a useful product: a debuggable, serial-traced boot
-manager for AMIX/AmigaOS on the A3000.
+manager for AMIX/AmigaOS on the A3000. The microkernel property (guests
+under SORIX-LDOM's control, break-in and resume) starts with M3.
+
+Status (2026-10-15): M0 done and tested on a real A3000 (Z3660). M1 floppy
+part done: takeover, shell, boot log, screen console, keyboard, CPU probing.
+Disks done early: partitions through Kickstart's drivers (any controller),
+native A3000 SCSI, `part`/`ls`, `boot dh0` (declining floppy boot block;
+on real hardware still being verified). Next: native Z3660 piscsi driver,
+then the M1 hard disk part and M2.
 
 ---
 
