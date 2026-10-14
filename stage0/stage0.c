@@ -460,6 +460,32 @@ rom_scan(void *sysbase)
 		lib_call(sysbase, LVO_DeleteMsgPort, 0, 0, (u32)(uintptr_t)port, 0);
 }
 
+/* stage0/alertpatch.S */
+extern u8 ap_start[], ap_old[], ap_end[];
+#define LVO_SetFunction		(-420)
+
+/*
+ * Strap reports a declining boot block with a recoverable alert
+ * (AN_BootError) that waits for a mouse click. Filter exactly that one
+ * alert, once; the filter then restores the original Alert(). Its few
+ * bytes stay allocated for the AmigaOS session.
+ */
+static void
+silence_boot_alert(void *sysbase)
+{
+	u32 size = (u32)(ap_end - ap_start);
+	u8 *m = (u8 *)lib_call(sysbase, LVO_AllocMem, size, MEMF_PUBLIC, 0, 0);
+
+	if (!m)
+		return;
+	memcpy(m, ap_start, size);
+	if (bootcap.exec_ver >= 37)
+		lib_call(sysbase, LVO_CacheClearU, 0, 0, 0, 0);
+	/* SetFunction(library a1, offset a0, new d0) returns the old vector */
+	PEEK32(m, ap_old - ap_start) = lib_call(sysbase, LVO_SetFunction,
+	    (u32)(uintptr_t)m, 0, (u32)LVO_Alert, (u32)(uintptr_t)sysbase);
+}
+
 /*
  * Booting another device: strap tries the boot nodes in priority order and,
  * when a boot block declines (returns an error), goes on with the next one
@@ -478,6 +504,7 @@ decline_boot(void *sysbase, void *ioreq, const char *name)
 		    bootcap.scsi_chip);
 	lib_call(sysbase, LVO_FreeMem, bootcap.hole_alloc_size, 0, 0,
 	    bootcap.hole_alloc);
+	silence_boot_alert(sysbase);
 	kprintf("stage0: declining to boot from the floppy; strap continues "
 	    "with the next boot device (%s is requested)\n", name);
 	while (!(REG16(SERDATR) & (1 << SERDATR_TSRE)))
