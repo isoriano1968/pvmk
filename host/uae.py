@@ -37,7 +37,7 @@ class Amiga:
     """FS-UAE process with its serial port attached to a pty we own."""
 
     def __init__(self, cpu, adf, log_path, hdf=None, hdf_ctrl="scsi",
-                 amix_hdf=None):
+                 amix_hdf=None, amix_ro=True):
         kick = os.environ.get("KICKSTART", os.path.expanduser(
             "~/Documents/FS-UAE/Kickstarts/A3000.47.111.rom"))
         if not os.path.isfile(kick):
@@ -62,7 +62,7 @@ class Amiga:
             # an AMIX disk: read-only, on SCSI ID 6 as AMIX was installed
             ([f"--hard_drive_1={os.path.abspath(amix_hdf)}",
               "--hard_drive_1_type=rdb", "--hard_drive_1_controller=scsi6",
-              "--hard_drive_1_read_only=1"] if amix_hdf else []) +
+              f"--hard_drive_1_read_only={int(amix_ro)}"] if amix_hdf else []) +
             os.environ.get("UAE_EXTRA", "").split(),
             stdout=self.uae_log, stderr=subprocess.STDOUT)
         self.slave = slave
@@ -112,7 +112,7 @@ class Amiga:
 
 def cmd_run(args):
     amiga = Amiga(args.cpu, args.adf, "build/serial.log", args.hdf,
-                  amix_hdf=args.amix_hdf)
+                  amix_hdf=args.amix_hdf, amix_ro=not args.amix_rw)
     print(f"uae.py: A3000/{args.cpu}, {args.adf}, serial on {amiga.slave_name}"
           " (log: build/serial.log). Ctrl-] quits.\r", flush=True)
     stdin = sys.stdin.fileno()
@@ -187,6 +187,8 @@ def test_one(cpu, adf, hdf, ctrl="scsi", amix_hdf=None):
             shell("part", rb"UNIX +" + dev + rb" +0 UNI\\1 +1MB")
             if amix_hdf:
                 shell("part", rb"UNIX_Root +scsi\.device +6 UNI\\1 +500MB")
+                shell("load unix_root:", rb"relocations, entry [0-9a-f]{8}",
+                      timeout=120)
                 shell("ls unix_root:/stand", rb"-rw-r--r-- +1475144 +unix")
                 shell("ls unix_root:/", rb"unix -> stand/unix")
                 shell("cat unix_root:/etc/vfstab", rb"c6d0s1\t/\tufs")
@@ -229,7 +231,9 @@ def main():
     r.add_argument("--cpu", choices=CPU_OPTS, default="030")
     r.add_argument("--adf", default="build/pvmk.adf")
     r.add_argument("--hdf", help="RDB hard disk image on the internal SCSI")
-    r.add_argument("--amix-hdf", help="AMIX disk image (read-only, SCSI ID 6)")
+    r.add_argument("--amix-hdf", help="AMIX disk image (SCSI ID 6)")
+    r.add_argument("--amix-rw", action="store_true",
+                   help="attach the AMIX disk writable (use a copy!)")
     t = sub.add_parser("test")
     t.add_argument("--cpu", nargs="+", choices=CPU_OPTS,
                    default=["030", "040", "060"])

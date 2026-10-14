@@ -700,7 +700,11 @@ Disks done early: partitions through Kickstart's drivers (any controller),
 native A3000 SCSI, `part`/`ls`, `boot dh0` (declining floppy boot block;
 on real hardware still being verified). Native Z3660 piscsi driver written
 (next to the A3000 SCSI driver), awaiting a test on the real machine.
-Next: M2.
+M2 in progress: UFS reader done; `boot unix_root:[path]` loads
+/stand/unix from the UFS root, relocates it and starts AMIX natively; AMIX
+2.1 reaches multi-user login in FS-UAE (68030). Still open in M2: kernel
+loading through Kickstart's drivers (disks without a native driver), and
+the real A3000.
 
 ---
 

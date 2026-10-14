@@ -50,6 +50,7 @@ struct bootcap {
 
 	u32 nmem;
 	struct memregion mem[BC_MAXMEM];
+	u8 memhdr[BC_MAXMEM][32];	/* raw struct MemHeader, for AMIX */
 	u32 ncd;
 	u8 configdev[BC_MAXCD][CONFIGDEV_SIZE];
 	u32 nfiles;

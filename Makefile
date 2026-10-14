@@ -5,6 +5,8 @@
 #   make run        boot the ADF in FS-UAE (UAE_CPU=030|040|060) with the serial
 #                   console in this terminal (Ctrl-] quits)
 #   make test       acceptance test in FS-UAE on 030/040/060 (shell, reset, logs)
+#   make run-amix   boot in FS-UAE with a writable copy of your AMIX disk
+#                   (build/amix-test.hdf); then: boot unix_root:
 #   make toolchain  fetch the m68k cross toolchain into $(TOOLCHAIN_DIR) (no root)
 #   make clean
 
@@ -39,14 +41,14 @@ BUDGET_IMAGE	 := 49152
 
 PVMK_OBJS	:= $(B)/stage0/entry.o $(B)/stage0/stage0.o $(B)/stage0/libcall.o \
 		   $(B)/stage0/takeover.o $(B)/core/stage1.o $(B)/core/vectors.o \
-		   $(B)/core/exc.o $(B)/cpu/cpu.o $(B)/cpu/probe.o \
+		   $(B)/core/exc.o $(B)/core/amixenter.o $(B)/cpu/cpu.o $(B)/cpu/probe.o \
 		   $(B)/drv/paula.o $(B)/drv/display.o $(B)/drv/keyboard.o $(B)/drv/wd33c93.o $(B)/drv/z3660scsi.o $(B)/svc/kprintf.o $(B)/svc/log.o \
 		   $(B)/svc/ffs.o $(B)/svc/conf.o $(B)/svc/shell.o $(B)/svc/crc32.o \
-		   $(B)/svc/disk.o $(B)/svc/rdb.o $(B)/svc/bootreq.o $(B)/svc/ufs.o
+		   $(B)/svc/disk.o $(B)/svc/rdb.o $(B)/svc/bootreq.o $(B)/svc/ufs.o $(B)/svc/amixload.o
 
 ADF_FILES	:= -f pvmk.conf=conf/pvmk.conf -f README=conf/README.disk
 
-.PHONY: all adf hdf check check-insns size-check verify run test toolchain clean
+.PHONY: all adf hdf run-amix check check-insns size-check verify run test toolchain clean
 all: adf verify
 
 adf: $(B)/pvmk.adf
@@ -123,6 +125,15 @@ AMIX_OPT	= $(if $(AMIX_HDF),--amix-hdf "$(AMIX_HDF)")
 run: $(B)/pvmk.adf $(UAE_HDF)
 	$(PYTHON) -I host/uae.py run --cpu $(UAE_CPU) --adf $(B)/pvmk.adf \
 		$(if $(UAE_HDF),--hdf $(UAE_HDF)) $(AMIX_OPT)
+
+# A writable copy: AMIX checks and writes its file systems when it boots.
+$(B)/amix-test.hdf:
+	@test -n "$(AMIX_HDF)" || { echo "no AMIX disk (AMIX_HDF=...)"; exit 1; }
+	cp "$(AMIX_HDF)" $@
+
+run-amix: $(B)/pvmk.adf $(B)/amix-test.hdf
+	$(PYTHON) -I host/uae.py run --cpu $(UAE_CPU) --adf $(B)/pvmk.adf \
+		--amix-hdf $(B)/amix-test.hdf --amix-rw
 
 test: $(B)/pvmk.adf $(B)/test.hdf
 	$(PYTHON) -I host/uae.py test --cpu $(UAE_CPUS) --adf $(B)/pvmk.adf \

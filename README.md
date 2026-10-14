@@ -26,6 +26,8 @@ make test       # FS-UAE A3000 with 68030/040/060: boot, shell commands, reset, 
 make run        # boot in FS-UAE with the serial console in this terminal (Ctrl-] quits)
 make run UAE_CPU=060
 make run UAE_HDF=                # without the test hard disk
+make run-amix                    # with a writable copy of your AMIX disk:
+                                 #   SORIX-LDOM> boot unix_root:
 host/pvterm /dev/ttyUSB0          # real A3000, 115200 8N1
 ```
 
@@ -80,8 +82,9 @@ SORIX-LDOM> help
   go <addr>                      call code, print D0
   regs                           registers of the last exception
   dmesg [-p]                     boot log, or the previous boot's
-  boot <partition>               AmigaOS partition: reboot into it (below);
-                                 AMIX partitions: M2
+  boot <partition>               AmigaOS partition: reboot into it (below)
+  load unix_root:[path]          load and relocate an AMIX kernel (/stand/unix)
+  boot unix_root:[path]          ... and start it natively (AMIX gets the machine)
   reset                          reboot into Kickstart
 ```
 
@@ -112,9 +115,14 @@ The boot log survives a warm reset: `dmesg -p` shows the previous boot.
   `host/mkhdf`).
 - Native Z3660 disk driver (piscsi mailbox), next to the A3000 SCSI driver:
   written, not yet tested on real hardware.
-- Next: M2 (UFS reader, AMIX kernel from its root file system). Hard disk
-  boot of SORIX-LDOM itself (`PVMK` partition, `pvinstall`) is the last
-  milestone (M9); the boot floppy is the boot medium until then.
+- M2 (in progress): read-only UFS reader; AMIX kernel loaded from its UFS
+  root (`boot unix_root:` = `/stand/unix`, any path accepted), relocated and
+  started natively the way AMIX's own boot2/copyit do. AMIX 2.1 boots to
+  multi-user login in FS-UAE (68030) from a real AMIX disk. Not yet: loading
+  through Kickstart's drivers for disks without a native driver, tests on
+  the real A3000.
+- Hard disk boot of SORIX-LDOM itself (`PVMK` partition, `pvinstall`) is
+  the last milestone (M9); the boot floppy is the boot medium until then.
 
 ## Layout
 

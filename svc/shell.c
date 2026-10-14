@@ -6,6 +6,7 @@
  * prefix is accepted.
  */
 #include "pvmk/amiga.h"
+#include "pvmk/amix.h"
 #include "pvmk/bootcap.h"
 #include "pvmk/bootreq.h"
 #include "pvmk/conf.h"
@@ -583,6 +584,140 @@ cmd_go(int argc, char **argv)
 	kprintf("go: returned %08x\n", (u32)call_addr(addr));
 }
 
+/* ------------------------------------------------------------------ */
+/* AMIX kernels                                                        */
+
+static struct amix_kernel amixk;
+static u8 *amix_image;			/* relocated ELF file, or NULL */
+
+/*
+ * Load and relocate an AMIX kernel from dev:path (default path
+ * /stand/unix). The file goes just below the SORIX-LDOM hole; the kernel
+ * will be copied to the start of the largest fast RAM region.
+ */
+static int
+amix_load(const char *arg)
+{
+	static struct ufs fs;
+	struct partition *p;
+	struct ufs_stat st;
+	const char *path;
+	u32 base, buf, s0, ms0, s1, ms1, ms;
+	int err;
+
+	amix_image = NULL;
+	if (!(p = dev_path("load", arg, &path)) || ufs_open("load", p, &fs))
+		return -1;
+	if (!*path)
+		path = AMIX_DEFAULT_PATH;
+	if ((err = ufs_lookup(&fs, path, 1, &st))) {
+		kprintf("load: %s:%s: %s\n", p->name, path, ufs_strerror(err));
+		return -1;
+	}
+	if ((st.mode & UFS_IFMT) != UFS_IFREG) {
+		kprintf("load: %s:%s: not a regular file\n", p->name, path);
+		return -1;
+	}
+	base = amix_bind_address();
+	buf = (bootcap.hole_base - st.size - 0x10000) & ~0xffffu;
+	if (!base || buf <= base + st.size) {
+		kprintf("load: not enough fast RAM for a %u byte kernel\n",
+		    st.size);
+		return -1;
+	}
+	kprintf("load: %s:%s, %u bytes, into %08x\n", p->name, path, st.size,
+	    buf);
+	time_now(&s0, &ms0);
+	if ((err = ufs_read_file(&fs, &st, 0, (void *)(uintptr_t)buf,
+	    st.size))) {
+		kprintf("load: read error: %s\n", ufs_strerror(err));
+		return -1;
+	}
+	time_now(&s1, &ms1);
+	ms = (s1 - s0) * 1000 + ms1 - ms0;
+	kprintf("load: read in %u ms (%u KB/s)\n", ms,
+	    ms ? st.size / ms * 1000 / 1024 : 0);
+	if (amix_relocate((u8 *)(uintptr_t)buf, st.size, base, &amixk))
+		return -1;
+	if (amixk.end > buf) {
+		kprintf("load: kernel (to %08x) would overlap its image at "
+		    "%08x\n", amixk.end, buf);
+		return -1;
+	}
+	kprintf("load: ELF type %u, %u relocations, entry %08x\n", amixk.type,
+	    amixk.nrel, amixk.bd.entry);
+	kprintf("load:   .text   %08x %7u bytes\n", amixk.bd.tvaddr,
+	    amixk.bd.tsize);
+	if (amixk.bd.rsize)
+		kprintf("load:   .rodata %08x %7u bytes\n", amixk.bd.rvaddr,
+		    amixk.bd.rsize);
+	if (amixk.bd.dsize)
+		kprintf("load:   .data   %08x %7u bytes\n", amixk.bd.dvaddr,
+		    amixk.bd.dsize);
+	kprintf("load:   end     %08x\n", amixk.end);
+	amix_image = (u8 *)(uintptr_t)buf;
+	return 0;
+}
+
+/*
+ * Native AMIX start (boot method 3): the kernel gets the whole machine.
+ * bootinfo, the handoff parameters and the initial stack live in the
+ * SCSI bounce buffer in chip RAM, which nothing needs any more.
+ */
+static void
+amix_start(void)
+{
+	u8 *chip = (u8 *)(uintptr_t)bootcap.scsi_chip;
+	struct amix_bootinfo *bi = (struct amix_bootinfo *)chip;
+	struct amix_handoff *h = (struct amix_handoff *)(chip + sizeof(*bi));
+	u32 i;
+
+	if (!amix_image || !chip) {
+		kprintf("boot: no kernel loaded\n");
+		return;
+	}
+	memset(bi, 0, sizeof(*bi));
+	for (i = 0; i < bootcap.ncd && i < AMIX_NAUTO; i++)
+		memcpy(bi->autocon[i], bootcap.configdev[i], sizeof(bi->autocon[0]));
+	for (i = 0; i < bootcap.nmem && i < AMIX_NAUTO; i++)
+		memcpy(bi->memory[i], bootcap.memhdr[i], sizeof(bi->memory[0]));
+	bi->bootdata = amixk.bd;
+
+	h->sp = bootcap.scsi_chip + SCSI_DMA_BLOCKS * 512 - 16;
+	h->entry = amixk.bd.entry;
+	h->d0 = AMIX_EXEC1;
+	h->d1 = (u32)(uintptr_t)bi;
+	h->tbuf = (u32)(uintptr_t)(amix_image + amixk.bd.toffset);
+	h->tvaddr = amixk.bd.tvaddr;
+	h->tsize = amixk.bd.tsize;
+	h->rbuf = (u32)(uintptr_t)(amix_image + amixk.bd.roffset);
+	h->rvaddr = amixk.bd.rvaddr;
+	h->rsize = amixk.bd.rsize;
+	h->dbuf = (u32)(uintptr_t)(amix_image + amixk.bd.doffset);
+	h->dvaddr = amixk.bd.dvaddr;
+	h->dsize = amixk.bd.dsize;
+	h->cpu = cpuinfo.model;
+
+	kprintf("boot: starting AMIX natively at %08x (D0=3, D1=%p): it gets "
+	    "the whole machine, SORIX-LDOM is gone until the next reset\n",
+	    h->entry, bi);
+	con_interactive(0);
+	while (!(REG16(SERDATR) & (1 << SERDATR_TSRE)))
+		;
+	amix_enter(h);
+}
+
+static void
+cmd_load(int argc, char **argv)
+{
+	if (argc < 2) {
+		kprintf("usage: load dev:[path]   (AMIX kernel, default %s)\n",
+		    AMIX_DEFAULT_PATH);
+		return;
+	}
+	amix_load(argv[1]);
+}
+
 static void
 cmd_scsi(int argc, char **argv)
 {
@@ -654,9 +789,27 @@ cmd_boot(int argc, char **argv)
 		kprintf("usage: boot <partition>   (see part)\n");
 		return;
 	}
-	if (!(p = part_find(what))) {
-		kprintf("boot: no partition %s (see part)\n", what);
-		return;
+	{
+		char dev[32];
+		u32 n = 0;
+
+		while (what[n] && what[n] != ':' && n < sizeof(dev) - 1) {
+			dev[n] = what[n];
+			n++;
+		}
+		dev[n] = 0;
+		if (!(p = part_find(dev))) {
+			kprintf("boot: no partition %s (see part)\n", dev);
+			return;
+		}
+		if (!what[n] && (p->dostype >> 8) == 0x554e49) {
+			static char withcolon[34];	/* "boot unix_root" */
+
+			memcpy(withcolon, p->name, n);
+			withcolon[n] = ':';
+			withcolon[n + 1] = 0;
+			what = withcolon;
+		}
 	}
 	if (dostype_is_amigaos(p->dostype)) {
 		/*
@@ -674,9 +827,10 @@ cmd_boot(int argc, char **argv)
 			return;
 		}
 		reboot_to_kickstart(p->name, "AmigaOS");
-	} else if ((p->dostype >> 8) == 0x554e49)
-		kprintf("boot: %s: loading AMIX from its root file system "
-		    "arrives in M2\n", p->name);
+	} else if ((p->dostype >> 8) == 0x554e49) {
+		if (amix_load(what) == 0)
+			amix_start();
+	}
 	else
 		kprintf("boot: %s: no loader for this partition type\n", p->name);
 }
@@ -708,7 +862,8 @@ static const struct cmd cmds[] = {
 	{ "dmesg", "[-p]",              "boot log (-p: previous boot)", cmd_dmesg },
 	{ "sload", "<addr> <len>",      "receive raw bytes over serial", cmd_sload },
 	{ "go",    "<addr>",            "call code at addr, print D0", cmd_go },
-	{ "boot",  "<partition>",       "boot it (AmigaOS: via Kickstart)", cmd_boot },
+	{ "load",  "dev:[path]",        "load and relocate an AMIX kernel", cmd_load },
+	{ "boot",  "<dev[:path]>",      "AmigaOS partition, or AMIX kernel", cmd_boot },
 	{ "reset", "",                  "reboot into Kickstart", cmd_reset },
 	{ NULL, NULL, NULL, NULL },
 };

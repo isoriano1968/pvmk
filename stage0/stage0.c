@@ -110,6 +110,7 @@ capture(void *sysbase, u32 medium)
 		m->attr = PEEK16(mh, MH_ATTRIBUTES);
 		m->lower = PEEK32(mh, MH_LOWER);
 		m->upper = PEEK32(mh, MH_UPPER);
+		memcpy(bc->memhdr[bc->nmem - 1], mh, sizeof(bc->memhdr[0]));
 	}
 
 	exp = (void *)lib_call(sysbase, LVO_OpenLibrary, 0, 0, 0,
