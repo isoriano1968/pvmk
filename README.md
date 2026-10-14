@@ -110,8 +110,11 @@ The boot log survives a warm reset: `dmesg -p` shows the previous boot.
   bounce buffer) also gives `ls`. Tested in FS-UAE on the internal SCSI and
   on UAE's own controller (`make test`, `build/test.hdf` from
   `host/mkhdf`).
-- M1 hard disk boot of SORIX-LDOM itself (RDB `PVMK` partition,
-  `pvinstall`): next.
+- Native Z3660 disk driver (piscsi mailbox), next to the A3000 SCSI driver:
+  written, not yet tested on real hardware.
+- Next: M2 (UFS reader, AMIX kernel from its root file system). Hard disk
+  boot of SORIX-LDOM itself (`PVMK` partition, `pvinstall`) is the last
+  milestone (M9); the boot floppy is the boot medium until then.
 
 ## Layout
 

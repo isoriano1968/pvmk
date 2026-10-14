@@ -10,11 +10,16 @@
 #define PBFF_BOOTABLE	1
 #define PBFF_NOMOUNT	2
 
+/* Native drivers that can read a partition after takeover */
+#define NATIVE_NONE	0		/* only through Kickstart, at stage0 */
+#define NATIVE_A3000	1		/* A3000 internal SCSI, unit = target */
+#define NATIVE_Z3660	2		/* Z3660 piscsi, unit = piscsi unit */
+
 struct partition {
 	char name[32];			/* DOS device name, e.g. DH0 */
 	char device[24];		/* Kickstart driver, e.g. scsi.device */
 	u32 unit;			/* its unit number */
-	s8 target;			/* native SCSI target, or -1 */
+	u8 native;			/* NATIVE_*: reachable after takeover */
 	u32 dostype;
 	u32 start, nblocks;		/* 512-byte blocks on the disk */
 	s32 bootpri;
@@ -30,13 +35,14 @@ typedef int (*rdb_read_fn)(void *ctx, u32 blk, void *buf);	/* 0 = ok */
 
 /*
  * Parse the RDB of one disk through rd and add (or, for the same device,
- * unit and name, update) its partitions. target is the native SCSI target
- * the disk is reachable on after takeover, or -1. Returns the number of
+ * unit and name, update) its partitions. native says which native driver
+ * reaches the disk after takeover (NATIVE_*). Returns the number of
  * partitions found on this disk, -1 if there is no RDB.
  */
 int  rdb_parse(rdb_read_fn rd, void *ctx, const char *device, u32 unit,
-	int target);
-int  rdb_scan(int verbose);		/* native SCSI disks */
+	int native);
+int  rdb_scan(int verbose);		/* disks of all native drivers */
+const char *native_name(u32 native);
 void part_show(void);
 struct partition *part_find(const char *name);	/* "dh0" or "DH0:" */
 const char *dostype_kind(u32 dostype);	/* "AmigaOS", "AMIX", ... */

@@ -677,7 +677,7 @@ Size budget (enforced by a `make size-check` target):
 | M | Deliverable | Acceptance |
 |---|---|---|
 | **M0** | Toolchain (m68k-elf), WinUAE A3000 configs (030/040/060), `pvterm`, Makefile, size check, `mkadf` + `bootblock.s` | `make adf` produces `pvmk.adf` that passes `mkadf --verify`; booting it in WinUAE prints "hello" on serial |
-| **M1** | Boot monitor: **floppy boot first** (bootblock, read-only FFS, `pvmk.conf`), stage0 capture, takeover, serial log, `COLOR00` codes, shell (`md/mw/regs/cpu/dmesg/ls`), `sload/go`; then the same boot block on an RDB `PVMK` partition + `pvinstall` | Real A3000/030 boots to `pvmk>` from a physical floppy written from `pvmk.adf`, then from HD; boot log + previous-boot log readable |
+| **M1** | Boot monitor from the **boot floppy** (bootblock, read-only FFS, `pvmk.conf`), stage0 capture, takeover, serial log, `COLOR00` codes, shell (`md/mw/regs/cpu/dmesg/ls`), `sload/go` | Real A3000 boots to the SORIX-LDOM shell from a physical floppy written from `pvmk.adf`; boot log + previous-boot log readable |
 | **M2** | Read-only UFS reader, `ls`/`cat` on UFS, kernel boot request with a free path (`boot unix:/stand/unix`), kernel read through Kickstart's driver at stage0 (any controller) or natively, `ld-amix` relocation + bootinfo synthesis, `boot -native` (SCSI driver, RDB and `part` were done early, in M1) | Unmodified AMIX boots multi-user via SORIX-LDOM **natively** from `/stand/unix` on its UFS root, on 030, from the internal SCSI and from a Z3660 HDF |
 | **M3** | vCPU core: emulation of all §4.3 instructions (030), reflection, `pvtest` conformance guest (shipped on the ADF under `personalities/`), **break-in and `resume`**, GDB stub, MMU self-test | `pvtest` passes 100 % on 030 (WinUAE + real HW), booted entirely from floppy; a break-in while `pvtest` runs opens the SORIX-LDOM shell and `resume` continues it; GDB can step pvtest |
 | **M4** | vMMU 030 shadow, IRQ virtualization, hypercalls, AMIX PV patches (`pvcons`, idle, reboot, detection) | AMIX boots **single-user deprivileged** on 030; a break-in into running AMIX and `resume` work; same kernel still boots native |
@@ -685,17 +685,22 @@ Size budget (enforced by a `make size-check` target):
 | **M6** | 040 then 060 back-ends, FPSP/ISP modules, 040/060 shadow MMU | M3–M5 acceptance repeated on A3640 (040) and an 060 card |
 | **M7** | `ld-kick`: Kickstart 3.1 personality, pass-through custom chips | Workbench boots under pvmk; `ColdReboot` returns to shell |
 | **M8** (stretch) | Concurrent personalities with device partitioning (e.g., AMIX headless on serial+SCSI, AmigaOS on display) | Proof of concept only |
+| **M9** (last) | Optional hard disk boot of SORIX-LDOM itself: the same boot block on an RDB `PVMK` partition (`DE_BOOTBLOCKS`), `pvinstall` to create/repair it. Until then, and possibly for good, the boot floppy is the boot medium | Real A3000 boots SORIX-LDOM from its `PVMK` partition with no floppy |
 
 M1 + M2 alone already give a useful product: a debuggable, serial-traced boot
 manager for AMIX/AmigaOS on the A3000. The microkernel property (guests
 under SORIX-LDOM's control, break-in and resume) starts with M3.
 
+The hard disk boot of SORIX-LDOM itself was moved from M1 to M9: it is
+only worth doing once everything works from the boot floppy.
+
 Status (2026-10-15): M0 done and tested on a real A3000 (Z3660). M1 floppy
 part done: takeover, shell, boot log, screen console, keyboard, CPU probing.
 Disks done early: partitions through Kickstart's drivers (any controller),
 native A3000 SCSI, `part`/`ls`, `boot dh0` (declining floppy boot block;
-on real hardware still being verified). Next: native Z3660 piscsi driver,
-then the M1 hard disk part and M2.
+on real hardware still being verified). Native Z3660 piscsi driver written
+(next to the A3000 SCSI driver), awaiting a test on the real machine.
+Next: M2.
 
 ---
 

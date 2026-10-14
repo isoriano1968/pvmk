@@ -36,7 +36,8 @@ PROMPT = b"SORIX-LDOM> "
 class Amiga:
     """FS-UAE process with its serial port attached to a pty we own."""
 
-    def __init__(self, cpu, adf, log_path, hdf=None, hdf_ctrl="scsi"):
+    def __init__(self, cpu, adf, log_path, hdf=None, hdf_ctrl="scsi",
+                 amix_hdf=None):
         kick = os.environ.get("KICKSTART", os.path.expanduser(
             "~/Documents/FS-UAE/Kickstarts/A3000.47.111.rom"))
         if not os.path.isfile(kick):
@@ -58,6 +59,10 @@ class Amiga:
             ([f"--hard_drive_0={os.path.abspath(hdf)}",
               "--hard_drive_0_type=rdb", f"--hard_drive_0_controller={hdf_ctrl}"]
              if hdf else []) +
+            # an AMIX disk: read-only, on SCSI ID 6 as AMIX was installed
+            ([f"--hard_drive_1={os.path.abspath(amix_hdf)}",
+              "--hard_drive_1_type=rdb", "--hard_drive_1_controller=scsi6",
+              "--hard_drive_1_read_only=1"] if amix_hdf else []) +
             os.environ.get("UAE_EXTRA", "").split(),
             stdout=self.uae_log, stderr=subprocess.STDOUT)
         self.slave = slave
@@ -106,7 +111,8 @@ class Amiga:
 
 
 def cmd_run(args):
-    amiga = Amiga(args.cpu, args.adf, "build/serial.log", args.hdf)
+    amiga = Amiga(args.cpu, args.adf, "build/serial.log", args.hdf,
+                  amix_hdf=args.amix_hdf)
     print(f"uae.py: A3000/{args.cpu}, {args.adf}, serial on {amiga.slave_name}"
           " (log: build/serial.log). Ctrl-] quits.\r", flush=True)
     stdin = sys.stdin.fileno()
@@ -132,9 +138,9 @@ def cmd_run(args):
     return 0
 
 
-def test_one(cpu, adf, hdf, ctrl="scsi"):
+def test_one(cpu, adf, hdf, ctrl="scsi", amix_hdf=None):
     log = f"build/serial-{cpu}{'' if ctrl == 'scsi' else '-' + ctrl}.log"
-    amiga = Amiga(cpu, adf, log, hdf, ctrl)
+    amiga = Amiga(cpu, adf, log, hdf, ctrl, amix_hdf)
     step = "boot"
 
     def shell(command, expect, timeout=10):
@@ -179,15 +185,24 @@ def test_one(cpu, adf, hdf, ctrl="scsi"):
             dev = {"scsi": rb"scsi\.device", "uae": rb"uaehf\.device"}[ctrl]
             shell("part", rb"DH0 +" + dev + rb" +0 DOS\\1 +4MB +0 +AmigaOS +TestDH0")
             shell("part", rb"UNIX +" + dev + rb" +0 UNI\\1 +1MB")
+            if amix_hdf:
+                shell("part", rb"UNIX_Root +scsi\.device +6 UNI\\1 +500MB")
+                shell("ls unix_root:/stand", rb"-rw-r--r-- +1475144 +unix")
+                shell("ls unix_root:/", rb"unix -> stand/unix")
+                shell("cat unix_root:/etc/vfstab", rb"c6d0s1\t/\tufs")
             if ctrl == "scsi":
                 shell("ls dh0:s", rb"startup-sequence +70")
             else:
-                shell("ls dh0:s", rb"can only read disks on the A3000")
-            step = "boot dh0"
-            amiga.send(b"boot dh0\r")
-            amiga.expect(rb"rebooting; AmigaOS will start from DH0", 10)
-            amiga.expect(rb"boot request: AmigaOS from DH0", 60)
-            amiga.expect(rb"declining to boot from the floppy", 10)
+                shell("ls dh0:s", rb"which has no native driver")
+            if amix_hdf:
+                # UNIX_Boot (priority 2) comes before DH0 in strap's order
+                shell("boot dh0", rb"Kickstart boots UNIX_Boot first")
+            else:
+                step = "boot dh0"
+                amiga.send(b"boot dh0\r")
+                amiga.expect(rb"rebooting; AmigaOS will start from DH0", 10)
+                amiga.expect(rb"boot request: AmigaOS from DH0", 60)
+                amiga.expect(rb"declining to boot from the floppy", 10)
     except TimeoutError as e:
         tail = (amiga.buf or b"")[-600:].decode("latin-1")
         print(f"uae.py test: {cpu} {ctrl}: FAIL at '{step}' waiting for {e} "
@@ -202,7 +217,7 @@ def test_one(cpu, adf, hdf, ctrl="scsi"):
 
 
 def cmd_test(args):
-    ok = all([test_one(cpu, args.adf, args.hdf, args.hdf_ctrl)
+    ok = all([test_one(cpu, args.adf, args.hdf, args.hdf_ctrl, args.amix_hdf)
               for cpu in args.cpu])
     return 0 if ok else 1
 
@@ -214,11 +229,14 @@ def main():
     r.add_argument("--cpu", choices=CPU_OPTS, default="030")
     r.add_argument("--adf", default="build/pvmk.adf")
     r.add_argument("--hdf", help="RDB hard disk image on the internal SCSI")
+    r.add_argument("--amix-hdf", help="AMIX disk image (read-only, SCSI ID 6)")
     t = sub.add_parser("test")
     t.add_argument("--cpu", nargs="+", choices=CPU_OPTS,
                    default=["030", "040", "060"])
     t.add_argument("--adf", default="build/pvmk.adf")
     t.add_argument("--hdf", help="RDB hard disk image on the internal SCSI")
+    t.add_argument("--amix-hdf", help="AMIX disk image (read-only, SCSI ID "
+                   "6): also test UFS on its UNIX_Root")
     t.add_argument("--hdf-ctrl", choices=["scsi", "uae"], default="scsi",
                    help="scsi: A3000 internal SCSI; uae: UAE's own driver "
                    "(uaehf.device), like accelerator/Zorro controllers")

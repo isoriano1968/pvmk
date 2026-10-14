@@ -35,14 +35,14 @@ HOSTCFLAGS	:= -O2 -Wall -Wextra -Iinclude
 
 # Size budgets (bytes), see PLAN.md section 10.
 BUDGET_BOOTBLOCK := 960
-BUDGET_IMAGE	 := 32768
+BUDGET_IMAGE	 := 49152
 
 PVMK_OBJS	:= $(B)/stage0/entry.o $(B)/stage0/stage0.o $(B)/stage0/libcall.o \
 		   $(B)/stage0/takeover.o $(B)/core/stage1.o $(B)/core/vectors.o \
 		   $(B)/core/exc.o $(B)/cpu/cpu.o $(B)/cpu/probe.o \
-		   $(B)/drv/paula.o $(B)/drv/display.o $(B)/drv/keyboard.o $(B)/drv/wd33c93.o $(B)/svc/kprintf.o $(B)/svc/log.o \
+		   $(B)/drv/paula.o $(B)/drv/display.o $(B)/drv/keyboard.o $(B)/drv/wd33c93.o $(B)/drv/z3660scsi.o $(B)/svc/kprintf.o $(B)/svc/log.o \
 		   $(B)/svc/ffs.o $(B)/svc/conf.o $(B)/svc/shell.o $(B)/svc/crc32.o \
-		   $(B)/svc/disk.o $(B)/svc/rdb.o $(B)/svc/bootreq.o
+		   $(B)/svc/disk.o $(B)/svc/rdb.o $(B)/svc/bootreq.o $(B)/svc/ufs.o
 
 ADF_FILES	:= -f pvmk.conf=conf/pvmk.conf -f README=conf/README.disk
 
@@ -72,6 +72,10 @@ $(B)/pvmk.elf: $(PVMK_OBJS) pvmk.ld
 
 $(B)/pvmk.bin: $(B)/pvmk.elf $(B)/host/mkimage
 	$(B)/host/mkimage $< $@
+
+$(B)/host/ufstool: host/ufstool.c svc/ufs.c include/pvmk/ufs.h
+	@mkdir -p $(@D)
+	$(HOSTCC) $(HOSTCFLAGS) -o $@ $<
 
 $(B)/host/%: host/%.c include/pvmk/image.h
 	@mkdir -p $(@D)
@@ -113,13 +117,16 @@ check: check-insns size-check verify
 UAE_CPU		?= 030
 UAE_CPUS	?= 030 040 060
 UAE_HDF		?= $(B)/test.hdf
+# Your AMIX disk, if present: attached read-only on SCSI ID 6 by run/test
+AMIX_HDF	?= $(wildcard $(HOME)/Documents/FS-UAE/Hard\ Drives/AMIGA_UNIX.hdf)
+AMIX_OPT	= $(if $(AMIX_HDF),--amix-hdf "$(AMIX_HDF)")
 run: $(B)/pvmk.adf $(UAE_HDF)
 	$(PYTHON) -I host/uae.py run --cpu $(UAE_CPU) --adf $(B)/pvmk.adf \
-		$(if $(UAE_HDF),--hdf $(UAE_HDF))
+		$(if $(UAE_HDF),--hdf $(UAE_HDF)) $(AMIX_OPT)
 
 test: $(B)/pvmk.adf $(B)/test.hdf
 	$(PYTHON) -I host/uae.py test --cpu $(UAE_CPUS) --adf $(B)/pvmk.adf \
-		--hdf $(B)/test.hdf
+		--hdf $(B)/test.hdf $(AMIX_OPT)
 	$(PYTHON) -I host/uae.py test --cpu 030 --adf $(B)/pvmk.adf \
 		--hdf $(B)/test.hdf --hdf-ctrl uae
 

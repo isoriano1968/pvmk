@@ -446,7 +446,7 @@ rom_scan(void *sysbase)
 		if (lib_call(sysbase, LVO_OpenDevice, du[i].unit, 0,
 		    (u32)(uintptr_t)du[i].name, (u32)(uintptr_t)r.io) & 0xff)
 			continue;
-		found = rdb_parse(rom_read, &r, du[i].name, du[i].unit, -1);
+		found = rdb_parse(rom_read, &r, du[i].name, du[i].unit, NATIVE_NONE);
 		kprintf("stage0: %s unit %u: %s", du[i].name, du[i].unit,
 		    found < 0 ? "no RDB\n" : "");
 		if (found >= 0)

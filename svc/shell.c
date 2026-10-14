@@ -18,6 +18,8 @@
 #include "pvmk/paula.h"
 #include "pvmk/rdb.h"
 #include "pvmk/scsi.h"
+#include "pvmk/ufs.h"
+#include "pvmk/z3660.h"
 #include "pvmk/version.h"
 
 #define LINE_MAX	128
@@ -278,34 +280,123 @@ ls_entry(void *arg, const char *name, u32 size, int is_dir, u32 blk)
 		kprintf("  %-32s %7u\n", name, size);
 }
 
-/* ls dev:path on an AmigaDOS (OFS/FFS) partition */
+/* Split "dev:path" and find a partition a native driver can read. */
+static struct partition *
+dev_path(const char *cmd, const char *arg, const char **path)
+{
+	char dev[32];
+	struct partition *p;
+	u32 n = 0;
+
+	*path = arg;
+	while (**path && **path != ':' && n < sizeof(dev) - 1)
+		dev[n++] = *(*path)++;
+	dev[n] = 0;
+	if (**path != ':') {
+		kprintf("%s: expected dev:path, e.g. dh0:s or unix_root:/stand\n",
+		    cmd);
+		return NULL;
+	}
+	(*path)++;
+	if (!(p = part_find(dev))) {
+		kprintf("%s: no partition %s (see part)\n", cmd, dev);
+		return NULL;
+	}
+	if (p->native == NATIVE_NONE) {
+		kprintf("%s: %s is on %s unit %u, which has no native driver; after "
+		    "takeover SORIX-LDOM reads disks on the A3000 internal SCSI "
+		    "and the Z3660\n", cmd, p->name, p->device, p->unit);
+		return NULL;
+	}
+	return p;
+}
+
+static int
+ufs_block(void *ctx, u32 blk, u32 count, void *buf)
+{
+	return part_read(ctx, blk, count, buf) ? -1 : 0;
+}
+
+/* Mount the UFS on an AMIX (UNI\x) partition. */
+static int
+ufs_open(const char *cmd, struct partition *p, struct ufs *fs)
+{
+	int err;
+
+	if ((p->dostype >> 8) != 0x554e49) {
+		kprintf("%s: %s is not an AMIX partition\n", cmd, p->name);
+		return -1;
+	}
+	fs->read = ufs_block;
+	fs->ctx = p;
+	if ((err = ufs_mount(fs))) {
+		kprintf("%s: %s: %s\n", cmd, p->name, ufs_strerror(err));
+		return -1;
+	}
+	return 0;
+}
+
+static void
+mode_str(u32 mode, char *s)
+{
+	static const char types[] = "?pc?d?b?-?l?s???";
+	const char *rwx = "rwxrwxrwx";
+	int i;
+
+	s[0] = types[(mode >> 12) & 0xf];
+	for (i = 0; i < 9; i++)
+		s[1 + i] = mode & (0400 >> i) ? rwx[i] : '-';
+	s[10] = 0;
+}
+
+struct ufs_ls {
+	struct ufs *fs;
+};
+
+static void
+ufs_ls_entry(void *arg, const char *name, const struct ufs_stat *st)
+{
+	struct ufs_ls *l = arg;
+	char m[11], target[64];
+
+	mode_str(st->mode, m);
+	kprintf("  %s %8u  %s", m, st->size, name);
+	if ((st->mode & UFS_IFMT) == UFS_IFLNK &&
+	    ufs_readlink(l->fs, st, target, sizeof(target)) == UFS_OK)
+		kprintf(" -> %s", target);
+	kprintf("\n");
+}
+
+/* ls dev:path on an AmigaDOS (OFS/FFS) or AMIX (UFS) partition */
 static void
 ls_part(const char *arg)
 {
 	static struct ffs fs;
-	char dev[32];
-	const char *path = arg;
+	static struct ufs ufs;
+	const char *path;
 	struct partition *p;
-	u32 n = 0, blk;
+	u32 blk;
 	int err, is_dir;
 
-	while (*path && *path != ':' && n < sizeof(dev) - 1)
-		dev[n++] = *path++;
-	dev[n] = 0;
-	if (*path == ':')
-		path++;
-	if (!(p = part_find(dev))) {
-		kprintf("ls: no partition %s\n", dev);
+	if (!(p = dev_path("ls", arg, &path)))
 		return;
-	}
-	if (p->target < 0) {
-		kprintf("ls: %s is on %s unit %u; after takeover SORIX-LDOM can only "
-		    "read disks on the A3000 internal SCSI\n", p->name, p->device,
-		    p->unit);
+	if ((p->dostype >> 8) == 0x554e49) {
+		struct ufs_stat st;
+		struct ufs_ls l = { &ufs };
+
+		if (ufs_open("ls", p, &ufs))
+			return;
+		err = ufs_lookup(&ufs, path, 1, &st);
+		if (!err && (st.mode & UFS_IFMT) == UFS_IFDIR)
+			err = ufs_list_dir(&ufs, &st, ufs_ls_entry, &l);
+		else if (!err)
+			ufs_ls_entry(&l, path, &st);
+		if (err)
+			kprintf("ls: %s: %s\n", arg, ufs_strerror(err));
 		return;
 	}
 	if ((p->dostype >> 8) != 0x444f53) {
-		kprintf("ls: %s is not an AmigaDOS OFS/FFS partition\n", p->name);
+		kprintf("ls: %s: no reader for this partition type\n", p->name);
 		return;
 	}
 	fs.read = part_block;
@@ -318,6 +409,51 @@ ls_part(const char *arg)
 		kprintf("  %s\n", path);
 	if (err)
 		kprintf("ls: %s: %s\n", arg, ffs_strerror(err));
+}
+
+/* cat dev:path: print a file from an AMIX (UFS) partition */
+static void
+cmd_cat(int argc, char **argv)
+{
+	static struct ufs fs;
+	static char chunk[1024];
+	struct partition *p;
+	struct ufs_stat st;
+	const char *path;
+	u32 off;
+	int err;
+
+	if (argc < 2) {
+		kprintf("usage: cat dev:path   (AMIX UFS partitions)\n");
+		return;
+	}
+	if (!(p = dev_path("cat", argv[1], &path)) || ufs_open("cat", p, &fs))
+		return;
+	if ((err = ufs_lookup(&fs, path, 1, &st))) {
+		kprintf("cat: %s: %s\n", argv[1], ufs_strerror(err));
+		return;
+	}
+	if ((st.mode & UFS_IFMT) != UFS_IFREG) {
+		kprintf("cat: %s: not a regular file\n", argv[1]);
+		return;
+	}
+	for (off = 0; off < st.size; off += sizeof(chunk)) {
+		u32 n = st.size - off < sizeof(chunk) ? st.size - off :
+		    sizeof(chunk), i;
+
+		if ((err = ufs_read_file(&fs, &st, off, chunk, n))) {
+			kprintf("\ncat: %s: %s\n", argv[1], ufs_strerror(err));
+			return;
+		}
+		for (i = 0; i < n; i++)
+			if (chunk[i] == '\n' || chunk[i] == '\t' ||
+			    (chunk[i] >= 0x20 && chunk[i] < 0x7f))
+				con_putc(chunk[i]);
+			else
+				con_putc('.');
+	}
+	if (st.size && chunk[(st.size - 1) % sizeof(chunk)] != '\n')
+		kprintf("\n");
 }
 
 static void
@@ -452,12 +588,12 @@ cmd_scsi(int argc, char **argv)
 {
 	(void)argc;
 	(void)argv;
-	if (scsi_init() != SCSI_OK) {
-		kprintf("scsi: no controller found\n");
-		return;
-	}
-	if (!disk_scan(1))
-		kprintf("scsi: no devices\n");
+	if (scsi_init() != SCSI_OK)
+		kprintf("scsi: no A3000 internal SCSI controller\n");
+	else if (!disk_scan(1))
+		kprintf("scsi: no devices on the A3000 internal SCSI\n");
+	if (z3660_init() == 0 && !z3660_scan(1))
+		kprintf("z3660: no units\n");
 	rdb_scan(1);
 }
 
@@ -499,10 +635,11 @@ next_boot_device(void)
 	return best ? best->name : NULL;
 }
 
+/* Reboot; the floppy declines and Kickstart (strap) boots dev. */
 static void
-reboot_to_amigaos(const char *dev)
+reboot_to_kickstart(const char *dev, const char *what)
 {
-	kprintf("boot: rebooting; AmigaOS will start from %s\n", dev);
+	kprintf("boot: rebooting; %s will start from %s\n", what, dev);
 	bootreq_set(sstack_top(), BOOTREQ_AMIGAOS, dev);
 	cmd_reset(0, NULL);
 }
@@ -522,6 +659,12 @@ cmd_boot(int argc, char **argv)
 		return;
 	}
 	if (dostype_is_amigaos(p->dostype)) {
+		/*
+		 * Kickstart boots AmigaOS partitions after the floppy declines.
+		 * (Not boot-block partitions such as AMIX's UNIX_Boot: its boot1
+		 * does not start after a declined floppy boot; AMIX is loaded by
+		 * SORIX-LDOM itself from its root file system, M2.)
+		 */
 		const char *next = next_boot_device();
 
 		if (!next || !name_eq(next, p->name)) {
@@ -530,9 +673,10 @@ cmd_boot(int argc, char **argv)
 			    next ? next : "(no bootable device)");
 			return;
 		}
-		reboot_to_amigaos(p->name);
+		reboot_to_kickstart(p->name, "AmigaOS");
 	} else if ((p->dostype >> 8) == 0x554e49)
-		kprintf("boot: %s: AMIX loader arrives in M2\n", p->name);
+		kprintf("boot: %s: loading AMIX from its root file system "
+		    "arrives in M2\n", p->name);
 	else
 		kprintf("boot: %s: no loader for this partition type\n", p->name);
 }
@@ -554,8 +698,9 @@ static const struct cmd cmds[] = {
 	{ "cpu",   "",                  "CPU, FPU, MMU, VBR, CACR", cmd_cpu },
 	{ "mem",   "",                  "memory map and hole layout", cmd_mem },
 	{ "conf",  "",                  "configuration in effect", cmd_conf },
-	{ "ls",    "[dev:path]",        "floppy directory, or a partition's", cmd_ls },
-	{ "scsi",  "",                  "rescan SCSI devices and partitions", cmd_scsi },
+	{ "ls",    "[dev:path]",        "floppy, AmigaDOS or AMIX (UFS) directory", cmd_ls },
+	{ "cat",   "dev:path",          "print a file (AMIX UFS)", cmd_cat },
+	{ "scsi",  "",                  "rescan disks (A3000 SCSI, Z3660)", cmd_scsi },
 	{ "part",  "",                  "list partitions", cmd_part },
 	{ "md",    "<addr> [len]",      "memory dump", cmd_md },
 	{ "mw",    "[.b|.w|.l] <a> <v>", "memory write (mw.b, mw.w, mw.l)", cmd_mw },

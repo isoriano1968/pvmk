@@ -12,6 +12,7 @@
 #include "pvmk/mk.h"
 #include "pvmk/rdb.h"
 #include "pvmk/scsi.h"
+#include "pvmk/z3660.h"
 #include "pvmk/version.h"
 
 static u32 vectors[256];
@@ -48,13 +49,18 @@ stage1_main(void *arg)
 	cpu_probe();
 	cpu_show();
 	scsi_dma_buffer(bc->scsi_chip, SCSI_DMA_BLOCKS * 512);
+	/* native disk drivers, side by side */
 	if (scsi_init() == SCSI_OK) {
 		kprintf("scsi: A3000 internal SCSI (WD33C93A), host ID %u\n",
 		    SCSI_HOST_ID);
 		disk_scan(1);
-		rdb_scan(0);
-		part_show();
 	} else
-		kprintf("scsi: no controller found\n");
+		kprintf("scsi: no A3000 internal SCSI controller\n");
+	if (z3660_init() == 0) {
+		kprintf("z3660: piscsi mailbox, board at %08x\n", z3660_board());
+		z3660_scan(1);
+	}
+	rdb_scan(0);
+	part_show();
 	shell_main();
 }

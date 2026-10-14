@@ -6,6 +6,7 @@
 #include "pvmk/kprintf.h"
 #include "pvmk/rdb.h"
 #include "pvmk/scsi.h"
+#include "pvmk/z3660.h"
 
 #define RDB_LOCATION_LIMIT	16
 #define END			0xffffffff
@@ -68,10 +69,15 @@ dostype_str(u32 t, char *buf)
 
 		buf[i] = (char)(c >= 0x20 && c < 0x7f ? c : '?');
 	}
-	buf[3] = '\\';
+	if ((t & 0xff) >= 0x20 && (t & 0xff) < 0x7f) {	/* e.g. "resv" */
+		buf[3] = (char)(t & 0xff);
+		buf[4] = 0;
+		return;
+	}
+	buf[3] = '\\';				/* e.g. DOS\1, UNI\1 */
 	buf[4] = (char)('0' + (t & 0xff) % 10);
 	buf[5] = 0;
-	if ((t & 0xff) >= 10) {		/* e.g. PFS\3 vs. raw values */
+	if ((t & 0xff) >= 10) {
 		buf[4] = "0123456789abcdef"[(t >> 4) & 0xf];
 		buf[5] = "0123456789abcdef"[t & 0xf];
 		buf[6] = 0;
@@ -106,10 +112,27 @@ dostype_kind(u32 t)
 int
 part_read(const struct partition *p, u32 b, u32 count, void *buf)
 {
-	if (b + count > p->nblocks || p->target < 0 ||
-	    p->target >= SCSI_MAXTARGET)
-		return SCSI_EIO;
-	return disk_read(&sdisks[(u32)p->target], p->start + b, count, buf);
+	if (b + count > p->nblocks)
+		return -1;
+	switch (p->native) {
+	case NATIVE_A3000:
+		if (p->unit >= SCSI_MAXTARGET)
+			return -1;
+		return disk_read(&sdisks[p->unit], p->start + b, count, buf);
+	case NATIVE_Z3660:
+		return z3660_read(p->unit, p->start + b, count, buf);
+	}
+	return -1;
+}
+
+const char *
+native_name(u32 native)
+{
+	switch (native) {
+	case NATIVE_A3000:	return "A3000 SCSI";
+	case NATIVE_Z3660:	return "Z3660";
+	}
+	return "-";
 }
 
 /* Volume name from the FFS/OFS root block, if this is a DOS\x partition. */
@@ -140,9 +163,9 @@ str_eq(const char *a, const char *b)
 }
 
 int
-rdb_parse(rdb_read_fn rd, void *ctx, const char *device, u32 unit, int target)
+rdb_parse(rdb_read_fn rd, void *ctx, const char *device, u32 unit, int native)
 {
-	u32 b, guard = 0, first = nparts, i;
+	u32 b, guard = 0, i;
 	int found = 0, rdsk = -1;
 
 	for (b = 0; b < RDB_LOCATION_LIMIT; b++)
@@ -169,7 +192,7 @@ rdb_parse(rdb_read_fn rd, void *ctx, const char *device, u32 unit, int target)
 		for (i = 0; device[i] && i < sizeof(q.device) - 1; i++)
 			q.device[i] = device[i];
 		q.unit = unit;
-		q.target = (s8)target;
+		q.native = (u8)native;
 		q.flags = rd32(blk + PB_FLAGS);
 		/* geometry in blocks of SizeBlock longs; convert to 512 bytes */
 		sizeblock = rd32(blk + DE_SIZEBLOCK) * 4 / 512;
@@ -200,22 +223,28 @@ rdb_parse(rdb_read_fn rd, void *ctx, const char *device, u32 unit, int target)
 	}
 	/* volume names last: read_volume() reuses the block buffer */
 	for (i = 0; i < nparts; i++)
-		if (parts[i].unit == unit && str_eq(parts[i].device, device) &&
-		    (i >= first || parts[i].target == target))
+		if (parts[i].unit == unit && str_eq(parts[i].device, device))
 			read_volume(&parts[i], rd, ctx);
 	return found;
 }
 
 static int
-native_read(void *ctx, u32 b, void *buf)
+a3000_read(void *ctx, u32 b, void *buf)
 {
 	return disk_read(ctx, b, 1, buf) ? -1 : 0;
 }
 
+static int
+z3660_block(void *ctx, u32 b, void *buf)
+{
+	return z3660_read((u32)(uintptr_t)ctx, b, 1, buf);
+}
+
 /*
- * Native scan of the A3000 internal SCSI. Kickstart's scsi.device numbers
- * its units by target ID, so partitions stage0 already found through
- * scsi.device are updated in place and become readable after takeover.
+ * Native scan. Kickstart's scsi.device numbers its units by target ID and
+ * z3660_scsi.device by piscsi unit, so partitions stage0 already found
+ * through those drivers are updated in place and become readable after
+ * takeover.
  */
 int
 rdb_scan(int verbose)
@@ -224,9 +253,14 @@ rdb_scan(int verbose)
 
 	for (t = 0; t < SCSI_MAXTARGET; t++)
 		if (sdisks[t].present && sdisks[t].ready && sdisks[t].type == 0 &&
-		    rdb_parse(native_read, &sdisks[t], "scsi.device", t, (int)t) < 0
-		    && verbose)
-			kprintf("rdb: target %u: no RDB\n", t);
+		    rdb_parse(a3000_read, &sdisks[t], "scsi.device", t,
+		    NATIVE_A3000) < 0 && verbose)
+			kprintf("rdb: A3000 SCSI target %u: no RDB\n", t);
+	for (t = 0; t < Z3660_UNITS; t++)
+		if (z3660_units[t].present && z3660_units[t].bsize == 512 &&
+		    rdb_parse(z3660_block, (void *)(uintptr_t)t,
+		    "z3660_scsi.device", t, NATIVE_Z3660) < 0 && verbose)
+			kprintf("rdb: Z3660 unit %u: no RDB\n", t);
 	if (verbose)
 		kprintf("rdb: %u partition(s)\n", nparts);
 	return (int)nparts;
@@ -241,16 +275,17 @@ part_show(void)
 		kprintf("no partitions (scsi: rescan)\n");
 		return;
 	}
-	kprintf("  %-8s %-18s %4s %-7s %7s %4s  %-10s %s\n", "name", "device",
-	    "unit", "dostype", "size", "pri", "kind", "volume");
+	kprintf("  %-10s %-18s %4s %-7s %7s %4s  %-10s %-14s %s\n", "name",
+	    "device", "unit", "dostype", "size", "pri", "kind", "volume",
+	    "native");
 	for (i = 0; i < nparts; i++) {
 		const struct partition *p = &parts[i];
 		char dt[8];
 
 		dostype_str(p->dostype, dt);
-		kprintf("  %-8s %-18s %4u %-7s %5uMB %4d  %-10s %s%s\n", p->name,
-		    p->device, p->unit, dt, p->nblocks / 2048, p->bootpri,
-		    dostype_kind(p->dostype), p->volume,
+		kprintf("  %-10s %-18s %4u %-7s %5uMB %4d  %-10s %-14s %s%s\n",
+		    p->name, p->device, p->unit, dt, p->nblocks / 2048, p->bootpri,
+		    dostype_kind(p->dostype), p->volume, native_name(p->native),
 		    p->flags & PBFF_BOOTABLE ? "" : " (not bootable)");
 	}
 }
