@@ -1,4 +1,7 @@
-# pvmk — Paravirtualizing Microkernel for the Amiga 3000
+# SORIX-LDOM (pvmk) — Paravirtualizing Microkernel for the Amiga 3000
+
+The microkernel identifies itself as **SORIX-LDOM** on the console;
+`pvmk` remains the source/working name.
 
 Working name: **pvmk**. A small supervisor-mode microkernel for the A3000
 (68030, and 68040/68060 accelerators) that boots from a floppy disk (built

@@ -1,4 +1,6 @@
-# pvmk — paravirtualizing microkernel for the Amiga 3000
+# SORIX-LDOM — paravirtualizing microkernel for the Amiga 3000
+
+Working/source name: `pvmk`.
 
 A small supervisor-mode microkernel for the Amiga 3000 (68030, 68040, 68060)
 that boots from floppy (`pvmk.adf`) or an RDB hard disk partition, offers a
@@ -7,8 +9,86 @@ disk partitions, running them deprivileged with a paravirtual interface.
 Boot and personality loading are traced over the serial port; a GDB remote
 stub is included.
 
-Status: **design phase**. See [PLAN.md](PLAN.md) for the architecture and
-milestones.
+See [PLAN.md](PLAN.md) for the architecture and milestones.
+
+## Building
+
+Requirements: a host C compiler, GNU make, Python 3, and an m68k cross
+toolchain. Without root, `make toolchain` unpacks GCC 14 + binutils +
+gdb-multiarch from the host's Debian/Ubuntu apt repositories into
+`~/opt/m68k-cross`. (With root: `apt install gcc-m68k-linux-gnu` and
+`make CROSS=m68k-linux-gnu-`.)
+
+```sh
+make            # build/pvmk.adf, verified
+make check      # 68060-safe instruction check, size budget, ADF verify
+make test       # FS-UAE A3000 with 68030/040/060: boot, shell commands, reset, logs
+make run        # boot in FS-UAE with the serial console in this terminal (Ctrl-] quits)
+make run UAE_CPU=060
+host/pvterm /dev/ttyUSB0          # real A3000, 115200 8N1
+```
+
+`make run`/`make test` need FS-UAE and an A3000 Kickstart ROM (`KICKSTART=`,
+default `~/Documents/FS-UAE/Kickstarts/A3000.47.111.rom`). The emulator's
+serial port is a pseudo-terminal driven by `host/uae.py`; the session is also
+written to `build/serial.log`.
+
+### Writing the boot floppy
+
+`build/pvmk.adf` is a standard 880 KB Amiga DD image (FFS volume `PVMK`).
+A PC floppy drive cannot write the Amiga format; use a Greaseweazle
+(`gw write --format amiga.amigados build/pvmk.adf`), KryoFlux or SuperCard
+Pro, write it from the Amiga with an ADF tool, or copy it to a Gotek.
+
+## Boot sequence
+
+1. Kickstart runs the boot block from DF0:. It loads the `pvmk` image with
+   one read, checks its CRC and jumps to it (serial: `BLCJ`).
+2. stage0 (Kickstart still alive) captures the memory list, expansion
+   boards, Kickstart version and CPU flags, reserves 256 KB at the top of
+   fast RAM, starts the boot log there, reads `DF0:pvmk.conf` and the
+   floppy directory, and stops the drive motor.
+3. Takeover: interrupts and DMA off, MMU off, data cache off; the image
+   moves itself to the reserved memory and re-applies its relocations.
+4. stage1 installs its own exception vectors, starts the text console on
+   the Amiga display (80 columns, topaz 8 copied from Kickstart at stage0)
+   and replays the log so far onto it, probes the CPU (68030, 68040, 68060
+   incl. EC/LC and FPU state) and starts the shell.
+
+All console output goes to the serial port and the screen; input comes
+from the serial port or the Amiga keyboard (cursor up/down for history).
+In `pvmk.conf`, `display=off` disables the screen and `keymap=` selects the
+keyboard layout: `us`, `de` (Amiga German keyboard) or `de-pc` (German PC
+keyboard under FS-UAE/WinUAE).
+
+Hold the left mouse button at power-on to skip SORIX-LDOM and boot
+AmigaOS from the same disk.
+
+## Shell
+
+```
+SORIX-LDOM> help
+  ver  cpu  mem  conf  ls        system information
+  md <addr> [len]                memory dump
+  mw[.b|.w|.l] <addr> <value>    memory write
+  sload <addr> <len>             receive raw bytes over serial
+  go <addr>                      call code, print D0
+  regs                           registers of the last exception
+  dmesg [-p]                     boot log, or the previous boot's
+  boot [personality]             (M2)
+  reset                          reboot into Kickstart
+```
+
+Numbers are hexadecimal; prefix `#` for decimal. Faults (bus error,
+illegal instruction, ...) print a register dump and return to the shell.
+The boot log survives a warm reset: `dmesg -p` shows the previous boot.
+
+## Status
+
+- M0 (toolchain, boot floppy, serial output): done.
+- M1 boot monitor, floppy part: done and tested in FS-UAE on 68030, 68040
+  and 68060. Not yet tried on real hardware.
+- M1 hard disk part (RDB `PVMK` partition, `pvinstall`): next.
 
 ## Layout
 
@@ -23,7 +103,7 @@ milestones.
 | `svc/` | Shell, log, GDB stub, ELF helpers |
 | `ld/` | Personality loaders (AMIX, PVPI, Kickstart, raw) |
 | `guest/pvtest/` | Bare-metal vCPU conformance test guest |
-| `host/` | `mkadf`, `pvterm`, `pvpack`, emulator configs |
+| `host/` | `mkimage`, `mkadf`, `uae.py` (FS-UAE run/test), `pvterm`, toolchain fetch |
 | `tools/` | AmigaOS-side tools (`pvinstall`) |
 | `conf/` | Default `pvmk.conf` placed on the boot floppy |
 | `include/pvmk/` | Public headers (hypercall ABI) shared with guests |

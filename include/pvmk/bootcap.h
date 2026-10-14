@@ -1,0 +1,65 @@
+/*
+ * What stage0 captures from Kickstart before takeover. Lives in the image's
+ * bss, so it moves with the image into the hole.
+ */
+#ifndef PVMK_BOOTCAP_H
+#define PVMK_BOOTCAP_H
+
+#include "pvmk/types.h"
+
+#define BC_MAXMEM	16
+#define BC_MAXCD	16		/* NAUTO in AMIX bootinfo.h */
+#define BC_MAXFILES	48
+#define CONFIGDEV_SIZE	0x44		/* struct ConfigDev */
+
+struct memregion {
+	u32 lower, upper;		/* [lower, upper) */
+	u16 attr;			/* MEMF_* */
+};
+
+struct bc_file {
+	char path[40];
+	u32 size;
+	u8 is_dir;
+};
+
+struct conf {
+	char serial[8];			/* debug | guest | shared */
+	u32 baud;
+	char def[32];			/* default personality */
+	u32 timeout;			/* autoboot seconds */
+	u32 loglevel;
+	u32 display;			/* text console on the screen */
+	u32 keymap;			/* KBD_US, KBD_DE */
+};
+
+struct bootcap {
+	u32 medium;			/* BOOT_* */
+	u16 exec_ver, exec_rev, softver, attn;
+	u8 vblank;
+	u32 eclock;
+	u32 hsync_hz;			/* CIA-B TOD rate */
+	u16 kick_ver, kick_rev;
+	u32 kick_base, kick_size;
+
+	u32 nmem;
+	struct memregion mem[BC_MAXMEM];
+	u32 ncd;
+	u8 configdev[BC_MAXCD][CONFIGDEV_SIZE];
+	u32 nfiles;
+	struct bc_file files[BC_MAXFILES];
+
+	int conf_loaded;
+	struct conf conf;
+
+	u32 hole_base, hole_top;
+	u32 image_base, image_size;	/* after takeover */
+
+	u32 disp_chip;			/* chip RAM for the text display, or 0 */
+	int font_ok;
+	u8 font[96 * 8];		/* topaz 8 from Kickstart, ' '..DEL */
+};
+
+extern struct bootcap bootcap;
+
+#endif /* PVMK_BOOTCAP_H */

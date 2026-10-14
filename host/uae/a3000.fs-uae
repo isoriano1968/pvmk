@@ -1,0 +1,18 @@
+# FS-UAE base configuration for pvmk: Amiga 3000, boot from DF0:.
+# host/run-uae.sh adds the Kickstart path, the floppy image, the serial
+# capture file and CPU overrides (030/040/060) on the command line.
+
+[fs-uae]
+amiga_model = A3000
+chip_memory = 2048
+motherboard_ram = 16384
+floppy_drive_speed = 0
+floppy_drive_count = 1
+jit_compiler = 0
+automatic_input_grab = 0
+fullscreen = 0
+window_width = 752
+window_height = 572
+uae_cpu_compatible = true
+uae_cpu_24bit_addressing = false
+uae_serial_direct = true

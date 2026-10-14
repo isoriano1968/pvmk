@@ -1,0 +1,26 @@
+#!/bin/sh
+# Serial console for pvmk.
+#
+#   host/pvterm /dev/ttyUSB0 [baud]   real A3000 via serial cable (default 115200)
+#   host/pvterm build/serial.log      follow the emulator serial capture (waits for it)
+#
+# Uses picocom, then minicom, then a plain stty+cat fallback (output only).
+set -eu
+
+dev=${1:-/dev/ttyUSB0}
+baud=${2:-115200}
+
+if [ ! -c "$dev" ]; then
+	# Not a serial device: follow the emulator capture file. -F waits for
+	# it to appear and reopens it when "make run" truncates it.
+	[ -e "$dev" ] || echo "pvterm: waiting for $dev (start: make run)" >&2
+	exec tail -n +1 -F "$dev" 2>/dev/null
+fi
+if command -v picocom >/dev/null 2>&1; then
+	exec picocom -b "$baud" --imap lfcrlf "$dev"
+elif command -v minicom >/dev/null 2>&1; then
+	exec minicom -b "$baud" -D "$dev"
+fi
+echo "pvterm: picocom/minicom not found, read-only fallback (Ctrl-C to quit)" >&2
+stty -F "$dev" "$baud" cs8 -cstopb -parenb raw -echo
+exec cat "$dev"
