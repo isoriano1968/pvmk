@@ -12,6 +12,9 @@
 #define SERDAT		0xdff030	/* serial data (write) */
 #define SERPER		0xdff032	/* serial period */
 #define COLOR00		0xdff180
+#define CUSTOM_INTREQR	0xdff01e
+#define CUSTOM_INTENA	0xdff09a
+#define CUSTOM_INTREQ	0xdff09c
 
 #define SERDATR_TBE	13		/* transmit buffer empty */
 #define SERDATR_TSRE	12		/* transmit shift register empty */

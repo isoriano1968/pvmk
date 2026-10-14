@@ -325,14 +325,13 @@ boot -native unix:/stand/unix # M2: hand the machine to AMIX entirely
 ```
 `default=` in `pvmk.conf` takes the same syntax (e.g. `default=unix:/stand/unix`).
 
-**I/O path.** After takeover only the A3000 internal SCSI has a native
-driver, while disks on other controllers (Z3660 HDFs, Zorro cards) are only
-reachable through Kickstart's drivers. So a kernel boot is a boot request,
-like `boot dh0`: the shell records `{partition, path, options}` in the
-reset-surviving log area and reboots; stage0 reads the kernel through
-Kickstart's driver for that partition (any controller) before takeover. If
-the partition is on the internal SCSI, the shell may instead read it
-directly with the native driver and skip the reboot.
+**I/O path.** The shell reads the kernel with SORIX-LDOM's native disk
+drivers (A3000 internal SCSI, Z3660). Reading it through Kickstart's
+drivers at stage0 (a boot request and a reboot, like `boot dh0`) was
+considered for disks without a native driver and dropped: AMIX needs a
+driver for its root disk as well, so a disk SORIX-LDOM cannot read natively
+is usually one AMIX cannot use as root either. Other controllers get a
+native driver instead (as the Z3660 did). Kept as an optional idea only.
 
 **UFS reader** (`svc/ufs.c`, read-only, about 600–800 lines, same block
 callback interface as the FFS reader): superblock at byte 8192 (magic
@@ -678,7 +677,7 @@ Size budget (enforced by a `make size-check` target):
 |---|---|---|
 | **M0** | Toolchain (m68k-elf), WinUAE A3000 configs (030/040/060), `pvterm`, Makefile, size check, `mkadf` + `bootblock.s` | `make adf` produces `pvmk.adf` that passes `mkadf --verify`; booting it in WinUAE prints "hello" on serial |
 | **M1** | Boot monitor from the **boot floppy** (bootblock, read-only FFS, `pvmk.conf`), stage0 capture, takeover, serial log, `COLOR00` codes, shell (`md/mw/regs/cpu/dmesg/ls`), `sload/go` | Real A3000 boots to the SORIX-LDOM shell from a physical floppy written from `pvmk.adf`; boot log + previous-boot log readable |
-| **M2** | Read-only UFS reader, `ls`/`cat` on UFS, kernel boot request with a free path (`boot unix:/stand/unix`), kernel read through Kickstart's driver at stage0 (any controller) or natively, `ld-amix` relocation + bootinfo synthesis, `boot -native` (SCSI driver, RDB and `part` were done early, in M1) | Unmodified AMIX boots multi-user via SORIX-LDOM **natively** from `/stand/unix` on its UFS root, on 030, from the internal SCSI and from a Z3660 HDF |
+| **M2** | Read-only UFS reader, `ls`/`cat` on UFS, kernel loading with a free path (`boot unix_root:/stand/unix`) through the native disk drivers, `ld-amix` relocation + bootinfo synthesis, native start (SCSI driver, RDB and `part` were done early, in M1) | Unmodified AMIX boots multi-user via SORIX-LDOM **natively** from `/stand/unix` on its UFS root, on 030, from the internal SCSI and from a Z3660 HDF |
 | **M3** | vCPU core: emulation of all §4.3 instructions (030), reflection, `pvtest` conformance guest (shipped on the ADF under `personalities/`), **break-in and `resume`**, GDB stub, MMU self-test | `pvtest` passes 100 % on 030 (WinUAE + real HW), booted entirely from floppy; a break-in while `pvtest` runs opens the SORIX-LDOM shell and `resume` continues it; GDB can step pvtest |
 | **M4** | vMMU 030 shadow, IRQ virtualization, hypercalls, AMIX PV patches (`pvcons`, idle, reboot, detection) | AMIX boots **single-user deprivileged** on 030; a break-in into running AMIX and `resume` work; same kernel still boots native |
 | **M5** | Stability + performance: multi-user, SCSI/network under load, stats, optional spl patching | AMIX multi-user; kernel build of a driver completes; overhead measured & documented |
@@ -700,11 +699,19 @@ Disks done early: partitions through Kickstart's drivers (any controller),
 native A3000 SCSI, `part`/`ls`, `boot dh0` (declining floppy boot block;
 on real hardware still being verified). Native Z3660 piscsi driver written
 (next to the A3000 SCSI driver), awaiting a test on the real machine.
-M2 in progress: UFS reader done; `boot unix_root:[path]` loads
+M2 done in FS-UAE: UFS reader; `boot unix_root:[path]` loads
 /stand/unix from the UFS root, relocates it and starts AMIX natively; AMIX
-2.1 reaches multi-user login in FS-UAE (68030). Still open in M2: kernel
-loading through Kickstart's drivers (disks without a native driver), and
-the real A3000.
+2.1 reaches multi-user login (68030). Open: the test on the real A3000
+(Z3660 driver, a CPU mode with a 68030 MMU for the 2.1 kernel). Loading
+through Kickstart's drivers was dropped (see §7.2). `boot dh0` on the real
+A3000 works; the recoverable boot alert is filtered.
+M3 in progress: virtual CPU core (trap-and-emulate of all §4.3
+instructions for 030/040/060, exception and interrupt reflection, real IPL
+= virtual IPL, hypercalls), pvtest conformance guest (23 checks) passing on
+030/040/060, break-in with Ctrl-C and `resume` working. Break-in is checked
+on the serial interrupt and on every guest exception; a silent guest spinning
+with interrupts masked can only be stopped by the level 7 interrupt (to do).
+Still open in M3: MMU self-test, GDB stub, idle on STOP.
 
 ---
 

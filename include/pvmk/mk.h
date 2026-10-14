@@ -21,7 +21,7 @@ void cold_reboot(void) __attribute__((noreturn));
 /* core/exc.c */
 struct excregs {
 	u32 d[8];
-	u32 a[8];
+	u32 a[8];		/* a[7]: USP (the guest's A7 when from a guest) */
 	u16 sr;
 	u32 pc;
 	u16 fmtvec;

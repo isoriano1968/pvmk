@@ -28,7 +28,8 @@ B		:= build
 CPUFLAGS	:= -m68020-60 -msoft-float
 CFLAGS		:= $(CPUFLAGS) -Os -std=gnu11 -ffreestanding -nostdinc -fno-pic \
 		   -fno-pie -fno-builtin -fno-common -fno-asynchronous-unwind-tables \
-		   -fomit-frame-pointer -Wall -Wextra -Werror -Iinclude \
+		   -fomit-frame-pointer -Wall -Wextra -Werror \
+		   -Wno-address-of-packed-member -fno-jump-tables -Iinclude \
 		   -MMD -MP -DPVMK_VERSION='"$(VERSION)"'
 ASFLAGS		:= $(CPUFLAGS) -MMD -MP -Iinclude -D__ASSEMBLER__
 LDFLAGS		:= -T pvmk.ld --emit-relocs -nostdlib -no-pie --no-dynamic-linker --no-warn-rwx-segments
@@ -37,11 +38,12 @@ HOSTCFLAGS	:= -O2 -Wall -Wextra -Iinclude
 
 # Size budgets (bytes), see PLAN.md section 10.
 BUDGET_BOOTBLOCK := 960
-BUDGET_IMAGE	 := 49152
+BUDGET_IMAGE	 := 65536
 
 PVMK_OBJS	:= $(B)/stage0/entry.o $(B)/stage0/stage0.o $(B)/stage0/libcall.o \
 		   $(B)/stage0/takeover.o $(B)/stage0/alertpatch.o $(B)/core/stage1.o $(B)/core/vectors.o \
-		   $(B)/core/exc.o $(B)/core/amixenter.o $(B)/cpu/cpu.o $(B)/cpu/probe.o \
+		   $(B)/core/exc.o $(B)/core/amixenter.o $(B)/core/vcpu.o \
+		   $(B)/core/vcpu_s.o $(B)/guest/pvtest/blob.o $(B)/cpu/cpu.o $(B)/cpu/probe.o \
 		   $(B)/drv/paula.o $(B)/drv/display.o $(B)/drv/keyboard.o $(B)/drv/wd33c93.o $(B)/drv/z3660scsi.o $(B)/svc/kprintf.o $(B)/svc/log.o \
 		   $(B)/svc/ffs.o $(B)/svc/conf.o $(B)/svc/shell.o $(B)/svc/crc32.o \
 		   $(B)/svc/disk.o $(B)/svc/rdb.o $(B)/svc/bootreq.o $(B)/svc/ufs.o $(B)/svc/amixload.o
@@ -68,6 +70,19 @@ $(B)/bootblock.bin: $(B)/boot/bootblock.o
 		$(READELF) -r $<; exit 1; fi
 	$(OBJCOPY) -O binary -j .text $< $@
 	@test $$(stat -c %s $@) -eq 1024 || { echo "bootblock.bin is not 1024 bytes"; exit 1; }
+
+# pvtest: conformance test guest for the virtual CPU, embedded in the image
+PVTEST_BASE	:= 0x60000
+$(B)/pvtest.elf: guest/pvtest/pvtest.S
+	@mkdir -p $(B)/guest
+	$(CC) -m68030 -c $< -o $(B)/guest/pvtest.o
+	$(LD) -Ttext=$(PVTEST_BASE) -nostdlib --no-warn-rwx-segments -o $@ \
+		$(B)/guest/pvtest.o
+
+$(B)/pvtest.bin: $(B)/pvtest.elf
+	$(OBJCOPY) -O binary $< $@
+
+$(B)/guest/pvtest/blob.o: $(B)/pvtest.bin
 
 $(B)/pvmk.elf: $(PVMK_OBJS) pvmk.ld
 	$(LD) $(LDFLAGS) -o $@ $(PVMK_OBJS) $(LIBGCC) -Map $(B)/pvmk.map

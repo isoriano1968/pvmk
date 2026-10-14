@@ -2,19 +2,27 @@
  * Exception entry for every vector. The vector number comes from the
  * format/vector word of the exception frame (68020+ frames all have it).
  *
- * Saves D0-D7/A0-A7 below the frame and calls exception(struct excregs *).
- * If it returns (probe traps), registers are restored and RTE resumes at
- * the possibly modified PC.
+ * Masks interrupts (an exception from a guest leaves the CPU at the guest's
+ * interrupt level), saves D0-D7/A0-A6 and the user stack pointer (in the A7
+ * slot: for exceptions from a guest that is the guest's A7) below the frame
+ * and calls exception(struct excregs *). If it returns, registers and USP
+ * are restored (possibly modified) and RTE resumes.
  */
 	.text
 	.globl	exc_entry
 exc_entry:
-	movem.l	%d0-%d7/%a0-%a7,-(%sp)
+	ori.w	#0x0700,%sr
+	subq.l	#4,%sp			/* A7 slot: USP */
+	movem.l	%d0-%d7/%a0-%a6,-(%sp)
+	move.l	%usp,%a0
+	move.l	%a0,60(%sp)
 	move.l	%sp,-(%sp)
 	jsr	exception
 	addq.l	#4,%sp
+	move.l	60(%sp),%a0
+	move.l	%a0,%usp
 	movem.l	(%sp)+,%d0-%d7/%a0-%a6
-	addq.l	#4,%sp			/* saved A7 */
+	addq.l	#4,%sp
 	rte
 
 /*

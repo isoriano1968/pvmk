@@ -85,6 +85,10 @@ SORIX-LDOM> help
   boot <partition>               AmigaOS partition: reboot into it (below)
   load unix_root:[path]          load and relocate an AMIX kernel (/stand/unix)
   boot unix_root:[path]          ... and start it natively (AMIX gets the machine)
+  pvtest [loop]                  run the virtual CPU test guest, deprivileged
+  guest                          state of the stopped guest (virtual registers)
+  resume                         continue the stopped guest
+  Ctrl-C (serial)                while a guest runs: stop it, enter the shell
   reset                          reboot into Kickstart
 ```
 
@@ -121,6 +125,14 @@ The boot log survives a warm reset: `dmesg -p` shows the previous boot.
   multi-user login in FS-UAE (68030) from a real AMIX disk. Not yet: loading
   through Kickstart's drivers for disks without a native driver, tests on
   the real A3000.
+- M3 (in progress): virtual CPU. A guest runs in user mode while
+  SORIX-LDOM keeps supervisor mode, its vectors and the MMU: privileged
+  instructions (SR access, MOVE USP, MOVEC, RTE, STOP, RESET, MOVES,
+  PMOVE/PFLUSH/PTEST, CINV/CPUSH, FSAVE/FRESTORE) are emulated, exceptions
+  and interrupts are reflected through the guest's own VBR, TRAP #15 is a
+  hypercall. Ctrl-C stops a running guest and opens the shell; `resume`
+  continues it. The pvtest guest passes on 68030, 68040 and 68060 in
+  FS-UAE. Still to do in M3: MMU self-test, GDB stub.
 - Hard disk boot of SORIX-LDOM itself (`PVMK` partition, `pvinstall`) is
   the last milestone (M9); the boot floppy is the boot medium until then.
 

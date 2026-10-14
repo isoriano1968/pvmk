@@ -174,6 +174,23 @@ def test_one(cpu, adf, hdf, ctrl="scsi", amix_hdf=None):
         shell("go 3000", rb"illegal instruction \(vector 4")
         shell("regs", rb"illegal instruction")
         shell("dmesg", rb"takeover complete")
+        # virtual CPU: the conformance guest, then break-in and resume
+        shell("pvtest", rb"pvtest: done, 0 failed", timeout=60)
+        step = "pvtest loop"
+        amiga.send(b"pvtest loop\r")
+        amiga.expect(rb"done, 0 failed", 60)
+        amiga.expect(rb"\.\.\.", 30)
+        step = "Ctrl-C"
+        amiga.send(b"\x03")
+        amiga.expect(rb"stopped \(Ctrl-C\)", 10)
+        amiga.expect(re.escape(PROMPT), 10)
+        shell("guest", rb"guest pvtest: stopped")
+        step = "resume"
+        amiga.send(b"resume\r")
+        amiga.expect(rb"\.\.\.", 30)
+        amiga.send(b"\x03")
+        amiga.expect(rb"stopped \(Ctrl-C\)", 10)
+        amiga.expect(re.escape(PROMPT), 10)
         step = "reset"
         amiga.send(b"reset\r")
         amiga.expect(rb"BLCJ", 60)

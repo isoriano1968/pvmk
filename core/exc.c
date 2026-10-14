@@ -5,8 +5,10 @@
 #include "pvmk/kprintf.h"
 #include "pvmk/log.h"
 #include "pvmk/mk.h"
+#include "pvmk/vcpu.h"
 
 static struct excregs last;
+static u32 last_ssp;
 static u32 last_fault_addr;
 static int last_valid, last_has_addr;
 
@@ -38,7 +40,7 @@ exc_name(u32 vec)
 }
 
 static void
-show(const struct excregs *r, int has_addr, u32 addr)
+show(const struct excregs *r, u32 ssp, int has_addr, u32 addr)
 {
 	u32 vec = (r->fmtvec & 0xfff) >> 2, fmt = r->fmtvec >> 12;
 	int i;
@@ -54,7 +56,10 @@ show(const struct excregs *r, int has_addr, u32 addr)
 	for (i = 0; i < 8; i++)
 		kprintf("    D%u %08x%s", i, r->d[i], i % 4 == 3 ? "\n" : "");
 	for (i = 0; i < 8; i++)
-		kprintf("    A%u %08x%s", i, r->a[i], i % 4 == 3 ? "\n" : "");
+		kprintf("    A%u %08x%s", i, i < 7 ? r->a[i] :
+		    r->sr & 0x2000 ? ssp : r->a[7], i % 4 == 3 ? "\n" : "");
+	if (r->sr & 0x2000)
+		kprintf("    USP %08x\n", r->a[7]);
 }
 
 void
@@ -63,14 +68,18 @@ exception(struct excregs *r)
 	u32 vec = (r->fmtvec & 0xfff) >> 2, fmt = r->fmtvec >> 12;
 	const u8 *frame = (const u8 *)&r->sr;
 
+	if (!(r->sr & 0x2000) && guest.running) {
+		vcpu_exception(r);		/* from the guest (user mode) */
+		return;
+	}
 	if (probe_resume && (vec == 4 || vec == 8 || vec == 10 || vec == 11)) {
 		r->pc = probe_resume;
 		return;
 	}
 
 	con_interactive(0);
-	r->a[7] = (u32)(uintptr_t)&r->sr;	/* SSP: the exception frame */
 	last = *r;
+	last_ssp = (u32)(uintptr_t)&r->sr;	/* SSP: the exception frame */
 	last_valid = 1;
 	last_has_addr = 1;
 	switch (fmt) {
@@ -90,7 +99,7 @@ exception(struct excregs *r)
 		break;
 	}
 	kprintf("\n");
-	show(r, last_has_addr, last_fault_addr);
+	show(r, last_ssp, last_has_addr, last_fault_addr);
 	kprintf("    entering shell\n");
 	restart(sstack_top(), shell_main);
 }
@@ -102,5 +111,5 @@ exc_show_last(void)
 		kprintf("no exception recorded since boot\n");
 		return;
 	}
-	show(&last, last_has_addr, last_fault_addr);
+	show(&last, last_ssp, last_has_addr, last_fault_addr);
 }

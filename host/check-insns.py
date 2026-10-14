@@ -14,7 +14,8 @@ import sys
 
 SYMBOL = re.compile(r"^[0-9a-f]+ <([^>]+)>:$")
 # Functions that deliberately execute such instructions under a trap guard.
-ALLOWED = {"probe_fpu"}
+# fpu_save/fpu_restore: FSAVE/FRESTORE on behalf of a guest (its FPU state).
+ALLOWED = {"probe_fpu", "fpu_save", "fpu_restore"}
 LINE = re.compile(r"^\s*([0-9a-f]+):\s+((?:[0-9a-f]{4} )+)\s*(\S+)\s*(.*)$")
 BANNED_PREFIX = ("movep", "cas2", "chk2", "cmp2")
 

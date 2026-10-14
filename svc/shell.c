@@ -20,6 +20,7 @@
 #include "pvmk/rdb.h"
 #include "pvmk/scsi.h"
 #include "pvmk/ufs.h"
+#include "pvmk/vcpu.h"
 #include "pvmk/z3660.h"
 #include "pvmk/version.h"
 
@@ -718,6 +719,39 @@ cmd_load(int argc, char **argv)
 	amix_load(argv[1]);
 }
 
+/* ------------------------------------------------------------------ */
+/* Guests                                                              */
+
+#define PVTEST_BASE	0x60000
+extern const u8 pvtest_image[], pvtest_image_end[];
+
+static void
+cmd_pvtest(int argc, char **argv)
+{
+	u32 size = (u32)(pvtest_image_end - pvtest_image);
+
+	memcpy((void *)PVTEST_BASE, pvtest_image, size);
+	icache_inval(cpuinfo.model);
+	vcpu_start("pvtest", PVTEST_BASE, PVTEST_BASE,
+	    argc > 1 && streq(argv[1], "loop"));
+}
+
+static void
+cmd_resume(int argc, char **argv)
+{
+	(void)argc;
+	(void)argv;
+	vcpu_resume();
+}
+
+static void
+cmd_guest(int argc, char **argv)
+{
+	(void)argc;
+	(void)argv;
+	vcpu_show();
+}
+
 static void
 cmd_scsi(int argc, char **argv)
 {
@@ -864,6 +898,9 @@ static const struct cmd cmds[] = {
 	{ "go",    "<addr>",            "call code at addr, print D0", cmd_go },
 	{ "load",  "dev:[path]",        "load and relocate an AMIX kernel", cmd_load },
 	{ "boot",  "<dev[:path]>",      "AmigaOS partition, or AMIX kernel", cmd_boot },
+	{ "pvtest", "[loop]",           "run the virtual CPU test guest", cmd_pvtest },
+	{ "guest", "",                  "state of the stopped guest", cmd_guest },
+	{ "resume", "",                 "continue the stopped guest", cmd_resume },
 	{ "reset", "",                  "reboot into Kickstart", cmd_reset },
 	{ NULL, NULL, NULL, NULL },
 };
