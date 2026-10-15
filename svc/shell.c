@@ -17,6 +17,7 @@
 #include "pvmk/kprintf.h"
 #include "pvmk/layout.h"
 #include "pvmk/log.h"
+#include "pvmk/menu.h"
 #include "pvmk/mk.h"
 #include "pvmk/paula.h"
 #include "pvmk/rdb.h"
@@ -708,6 +709,8 @@ amix_start_pv(struct amix_bootinfo *bi, u32 sp)
 	    amix_image + amixk.bd.roffset, amixk.bd.rsize);
 	memcpy((void *)(uintptr_t)amixk.bd.dvaddr,
 	    amix_image + amixk.bd.doffset, amixk.bd.dsize);
+	if (amixk.cputype)			/* 68040/68060 port kernel */
+		*(volatile u32 *)(uintptr_t)amixk.cputype = cpuinfo.model;
 	amix_image = NULL;			/* overwritten from now on */
 	kprintf("boot: PV patches: %d of 3 routines (copyin, copyout, "
 	    "haltsys)\n", amix_pv_patch(&amixk));
@@ -767,6 +770,10 @@ amix_start(int pv)
 
 	if (pv)
 		amix_start_pv(bi, h->sp);
+	if (amixk.cputype >= amixk.bd.dvaddr &&
+	    amixk.cputype + 4 <= amixk.bd.dvaddr + amixk.bd.dsize)
+		*(u32 *)(amix_image + amixk.bd.doffset +
+		    (amixk.cputype - amixk.bd.dvaddr)) = cpuinfo.model;
 	vmmu_off();
 	kprintf("boot: starting AMIX natively at %08x (D0=3, D1=%p): it gets "
 	    "the whole machine, SORIX-LDOM is gone until the next reset\n",
@@ -1017,64 +1024,64 @@ reboot_to_kickstart(const char *dev, const char *what)
 	cmd_reset(0, NULL);
 }
 
-static char reboot_what[40];		/* last "boot -pv" target */
+/* the last deprivileged boot, for a guest reboot and the fallback */
+static char last_target[40];
+static int last_nondefault;
+static u32 last_start;			/* seconds since power-on */
 
-static void
-cmd_boot(int argc, char **argv)
+/*
+ * Does the loaded AMIX kernel fit this CPU? The 68040/68060 port
+ * (amigaux.org) has a cputype variable its loader sets; the stock kernel
+ * is for the 68020/68030 PMMU.
+ */
+static int
+kernel_fits(void)
 {
-	const char *what;
+	if (cpuinfo.model >= 40 && !amixk.cputype) {
+		kprintf("boot: this is a stock 68020/68030 kernel; the CPU is a "
+		    "680%u\n", cpuinfo.model);
+		return 0;
+	}
+	if (cpuinfo.model < 40 && amixk.cputype) {
+		kprintf("boot: this is a 68040/68060 kernel (cputype); the CPU is "
+		    "a 680%u\n", cpuinfo.model);
+		return 0;
+	}
+	return 1;
+}
+
+/*
+ * Boot target (dev[:path]): an AmigaOS partition (through Kickstart) or an
+ * AMIX kernel, deprivileged (pv) or native. Returns only if it did not
+ * boot: -1, or BOOT_ENOTFIT for a kernel that does not fit the CPU
+ * (force boots it anyway).
+ */
+int
+boot_target(const char *what, int pv, int force)
+{
 	struct partition *p;
-	int pv = 0;
+	char dev[32];
+	static char withcolon[34];
+	u32 n = 0, sec, ms;
 
-	if (argc > 1 && (streq(argv[1], "-pv") || streq(argv[1], "-native"))) {
-		pv = argv[1][1] == 'p';
-		argc--;
-		argv++;
+	if (!what || !*what) {
+		kprintf("usage: boot [-pv|-native] [-f] <dev[:path]>   (see part)\n");
+		return -1;
 	}
-	what = argc > 1 ? argv[1] : bootcap.conf.def;
-	if (pv && !cpuinfo.mmu_ok) {
-		kprintf("boot: -pv needs a working MMU (MMU self-test %s)\n",
-		    mmu_result());
-		return;
+	while (what[n] && what[n] != ':' && n < sizeof(dev) - 1) {
+		dev[n] = what[n];
+		n++;
 	}
-	if (pv) {				/* for a guest reboot */
-		u32 n = 0;
-
-		while (what[n] && n < sizeof(reboot_what) - 1) {
-			reboot_what[n] = what[n];
-			n++;
-		}
-		reboot_what[n] = 0;
+	dev[n] = 0;
+	if (!(p = part_find(dev))) {
+		kprintf("boot: no partition %s (see part)\n", dev);
+		return -1;
 	}
-	if (pv && cpuinfo.model != 30)
-		kprintf("boot: warning: no shadow MMU on the 680%u yet; the "
-		    "guest runs untranslated\n", cpuinfo.model);
-
-	if (!*what) {
-		kprintf("usage: boot <partition>   (see part)\n");
-		return;
-	}
-	{
-		char dev[32];
-		u32 n = 0;
-
-		while (what[n] && what[n] != ':' && n < sizeof(dev) - 1) {
-			dev[n] = what[n];
-			n++;
-		}
-		dev[n] = 0;
-		if (!(p = part_find(dev))) {
-			kprintf("boot: no partition %s (see part)\n", dev);
-			return;
-		}
-		if (!what[n] && (p->dostype >> 8) == 0x554e49) {
-			static char withcolon[34];	/* "boot unix_root" */
-
-			memcpy(withcolon, p->name, n);
-			withcolon[n] = ':';
-			withcolon[n + 1] = 0;
-			what = withcolon;
-		}
+	if (!what[n] && (p->dostype >> 8) == 0x554e49) {
+		memcpy(withcolon, p->name, n);	/* "boot unix_root" */
+		withcolon[n] = ':';
+		withcolon[n + 1] = 0;
+		what = withcolon;
 	}
 	if (dostype_is_amigaos(p->dostype)) {
 		/*
@@ -1089,15 +1096,159 @@ cmd_boot(int argc, char **argv)
 			kprintf("boot: %s: Kickstart boots %s first after the floppy; "
 			    "only that one can be selected from here\n", p->name,
 			    next ? next : "(no bootable device)");
-			return;
+			return -1;
 		}
 		reboot_to_kickstart(p->name, "AmigaOS");
-	} else if ((p->dostype >> 8) == 0x554e49) {
-		if (amix_load(what) == 0)
-			amix_start(pv);
+		return -1;
 	}
-	else
+	if ((p->dostype >> 8) != 0x554e49) {
 		kprintf("boot: %s: no loader for this partition type\n", p->name);
+		return -1;
+	}
+	if (pv && !cpuinfo.mmu_ok) {
+		kprintf("boot: -pv needs a working MMU (MMU self-test %s)\n",
+		    mmu_result());
+		return -1;
+	}
+	if (amix_load(what))
+		return -1;
+	if (!kernel_fits() && !force) {
+		kprintf("boot: not started (boot -f, or confirm in the menu)\n");
+		return BOOT_ENOTFIT;
+	}
+	if (pv && cpuinfo.model != 30)
+		kprintf("boot: warning: no shadow MMU on the 680%u yet; the "
+		    "guest runs untranslated\n", cpuinfo.model);
+	if (pv) {
+		for (n = 0; what[n] && n < sizeof(last_target) - 1; n++)
+			last_target[n] = what[n];
+		last_target[n] = 0;
+		last_nondefault = !menu_is_default(what);
+		time_now(&sec, &ms);
+		last_start = sec;
+	}
+	amix_start(pv);
+	return -1;
+}
+
+static void
+cmd_boot(int argc, char **argv)
+{
+	int pv = 0, force = 0, i;
+
+	for (i = 1; i < argc && argv[i][0] == '-'; i++) {
+		if (streq(argv[i], "-pv"))
+			pv = 1;
+		else if (streq(argv[i], "-native"))
+			pv = 0;
+		else if (streq(argv[i], "-f"))
+			force = 1;
+		else {
+			kprintf("boot: unknown option %s\n", argv[i]);
+			return;
+		}
+	}
+	boot_target(i < argc ? argv[i] : bootcap.conf.def, pv, force);
+}
+
+/* once-only next boot: nextboot [-pv|-native] dev[:path] | label, or -c */
+static void
+cmd_nextboot(int argc, char **argv)
+{
+	u32 mode = ENTRY_AUTO;
+	int i;
+
+	for (i = 1; i < argc && argv[i][0] == '-'; i++) {
+		if (streq(argv[i], "-pv"))
+			mode = ENTRY_PV;
+		else if (streq(argv[i], "-native"))
+			mode = ENTRY_NATIVE;
+		else if (streq(argv[i], "-c")) {
+			nextboot_set(sstack_top(), "", 0);
+			kprintf("nextboot: cleared\n");
+			return;
+		}
+	}
+	if (i >= argc) {
+		kprintf("usage: nextboot [-pv|-native] <dev:path|label>, "
+		    "nextboot -c\n");
+		return;
+	}
+	nextboot_set(sstack_top(), argv[i], mode);
+	kprintf("nextboot: %s once, at the next start of the boot menu\n",
+	    argv[i]);
+}
+
+int
+shell_getc(u32 timeout_ms)
+{
+	return timeout_ms ? getc_timeout(timeout_ms, 0) : getc_wait();
+}
+
+const char *
+amigaos_next(void)
+{
+	return next_boot_device();
+}
+
+void
+shell_reboot(void)
+{
+	cmd_reset(0, NULL);
+	for (;;)
+		;
+}
+
+struct kern_list {
+	struct ufs *fs;
+	const char *part;
+	void (*cb)(void *arg, const char *path, u32 size);
+	void *arg;
+};
+
+static void
+kern_entry(void *arg, const char *name, const struct ufs_stat *st)
+{
+	struct kern_list *k = arg;
+	char path[64];
+	u32 n = 0, i;
+
+	if ((st->mode & UFS_IFMT) != UFS_IFREG || st->size < 65536 ||
+	    name[0] != 'u' || name[1] != 'n' || name[2] != 'i' || name[3] != 'x')
+		return;
+	for (i = 0; k->part[i] && n < sizeof(path) - 1; i++)
+		path[n++] = k->part[i];
+	for (i = 0; ":/stand/"[i] && n < sizeof(path) - 1; i++)
+		path[n++] = ":/stand/"[i];
+	for (i = 0; name[i] && n < sizeof(path) - 1; i++)
+		path[n++] = name[i];
+	path[n] = 0;
+	k->cb(k->arg, path, st->size);
+}
+
+/* Kernels in /stand of an AMIX root (regular files unix*, 64 KB or more) */
+int
+amix_kernels(const char *part, void (*cb)(void *arg, const char *path,
+    u32 size), void *arg)
+{
+	struct partition *p = part_find(part);
+	struct ufs fs;
+	struct ufs_stat st;
+	struct kern_list k = { &fs, part, cb, arg };
+
+	if (!p || ufs_open("menu", p, &fs) ||
+	    ufs_lookup(&fs, "/stand", 1, &st) != UFS_OK)
+		return -1;
+	k.part = p->name;
+	return ufs_list_dir(&fs, &st, kern_entry, &k) == UFS_OK ? 0 : -1;
+}
+
+static void
+cmd_menu(int argc, char **argv)
+{
+	(void)argc;
+	(void)argv;
+	menu_run(NULL);
 }
 
 static void
@@ -1129,7 +1280,9 @@ static const struct cmd cmds[] = {
 	{ "sload", "<addr> <len>",      "receive raw bytes over serial", cmd_sload },
 	{ "go",    "<addr>",            "call code at addr, print D0", cmd_go },
 	{ "load",  "dev:[path]",        "load and relocate an AMIX kernel", cmd_load },
-	{ "boot",  "[-pv] <dev[:path]>", "AmigaOS partition, or AMIX kernel (-pv: deprivileged)", cmd_boot },
+	{ "boot",  "[-pv] [-f] <dev[:path]>", "AmigaOS partition, or AMIX kernel (-pv: deprivileged, -f: any CPU)", cmd_boot },
+	{ "nextboot", "[-pv] <target>|-c", "boot target once, at the next boot menu", cmd_nextboot },
+	{ "menu",  "",                  "the boot menu", cmd_menu },
 	{ "pvtest", "[loop] [stop]",    "run the virtual CPU test guest", cmd_pvtest },
 	{ "gdb",   "",                  "serve GDB on the serial port (guest)", cmd_gdb },
 	{ "guest", "[log]",             "state of the stopped guest (log: AMIX messages)", cmd_guest },
@@ -1195,6 +1348,10 @@ autoboot(void)
 	if (autoboot_done)
 		return;
 	autoboot_done = 1;
+	if (bootcap.conf.menu) {
+		menu_start();			/* returns for the shell */
+		return;
+	}
 	if (!bootcap.conf.def[0])
 		return;
 	kprintf("autoboot: %s in %u s, press any key for the shell\n",
@@ -1214,13 +1371,20 @@ shell_main(void)
 
 	if (gdb_active)
 		gdb_main();		/* the guest stopped while GDB is attached */
-	if (guest.reboot && reboot_what[0]) {
-		char *argv[3] = { "boot", "-pv", reboot_what };
+	if (guest.reboot && last_target[0]) {
+		u32 sec, ms;
 
 		guest.reboot = 0;
-		kprintf("boot: guest reboot: boot -pv %s\n", reboot_what);
+		time_now(&sec, &ms);
 		scsi_init();			/* after the guest's driver */
-		cmd_boot(3, argv);
+		if (last_nondefault && sec - last_start < bootcap.conf.fallback) {
+			kprintf("boot: %s rebooted after %u s: falling back to the "
+			    "default\n", last_target, sec - last_start);
+			menu_run(NULL);
+		} else {
+			kprintf("boot: guest reboot\n");
+			menu_run(last_target);
+		}
 	}
 	guest.reboot = 0;
 	if (guest.kbd_break) {

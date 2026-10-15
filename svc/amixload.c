@@ -33,6 +33,7 @@
 #define SHN_COMMON	0xfff2
 #define R_68K_NONE	0
 #define R_68K_32	1
+#define R_68K_PC32	4		/* 040/060 port kernels (FPSP) */
 
 struct ehdr {
 	u8 ident[16];
@@ -228,6 +229,8 @@ relocate_rel(u8 *elf, u32 size, u32 base, struct amix_kernel *k)
 			want = &k->loadedcoplist;
 		else if (name_is(strtab, strsize, s->name, "ExecingCopList"))
 			want = &k->execingcoplist;
+		else if (name_is(strtab, strsize, s->name, "cputype"))
+			want = &k->cputype;
 		if (want)
 			*want = sh[s->shndx].addr + s->value;
 	}
@@ -260,7 +263,7 @@ relocate_rel(u8 *elf, u32 size, u32 base, struct amix_kernel *k)
 
 			if (type == R_68K_NONE)
 				continue;
-			if (type != R_68K_32) {
+			if (type != R_68K_32 && type != R_68K_PC32) {
 				kprintf("amix: unsupported relocation type %u\n", type);
 				return -1;
 			}
@@ -281,8 +284,10 @@ relocate_rel(u8 *elf, u32 size, u32 base, struct amix_kernel *k)
 				    "?");
 				return -1;
 			}
-			*(u32 *)(elf + target->offset + r->offset) =
-			    value + (u32)r->addend;
+			value += (u32)r->addend;
+			if (type == R_68K_PC32)		/* S + A - P */
+				value -= target->addr + r->offset;
+			*(u32 *)(elf + target->offset + r->offset) = value;
 			k->nrel++;
 		}
 	}

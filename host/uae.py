@@ -37,6 +37,14 @@ CPU_OPTS = {
 PROMPT = b"SORIX-LDOM> "
 
 
+def to_shell(amiga, timeout):
+    """From the boot menu (no default configured) to the shell."""
+    amiga.expect(rb"boot menu", timeout)
+    amiga.expect(rb"Select: ", 15)
+    amiga.send(b"s")
+    amiga.expect(re.escape(PROMPT), 15)
+
+
 class Amiga:
     """FS-UAE process with its serial port attached to a pty we own."""
 
@@ -233,6 +241,16 @@ def test_one(cpu, adf, hdf, ctrl="scsi", amix_hdf=None):
         amiga.expect(rb"takeover complete", 30)
         amiga.expect(rb"cpu: 68" + cpu.encode() + rb"[ ,]", 10)
         amiga.expect(rb"cpu: MMU self-test passed", 10)
+        step = "boot menu"
+        amiga.expect(rb"boot menu", 15)
+        amiga.expect(rb"Select: ", 15)
+        if amix_hdf:
+            amiga.send(b"k")
+            amiga.expect(rb"UNIX_Root:/stand/unix +\d+ bytes", 30)
+            amiga.expect(rb"Kernel: ", 10)
+            amiga.send(b"b")
+            amiga.expect(rb"Select: ", 15)
+        amiga.send(b"s")
         amiga.expect(re.escape(PROMPT), 15)
         shell("ver", rb"SORIX-LDOM \S+, boot 1,")
         shell("help", rb"sload")
@@ -273,7 +291,7 @@ def test_one(cpu, adf, hdf, ctrl="scsi", amix_hdf=None):
         amiga.send(b"reset\r")
         amiga.expect(rb"BLCJ", 60)
         amiga.expect(rb"previous boot log found", 30)
-        amiga.expect(re.escape(PROMPT), 30)
+        to_shell(amiga, 30)
         shell("ver", rb"boot 2,")
         shell("dmesg -p", rb"illegal instruction")
         if hdf:
@@ -302,9 +320,14 @@ def test_one(cpu, adf, hdf, ctrl="scsi", amix_hdf=None):
                 amiga.expect(rb"declining to boot from the floppy", 10)
             # last: AMIX deprivileged takes over SCSI and chip RAM
             if amix_hdf and cpu == "030":
-                # AMIX deprivileged (shadow MMU): up to its banner
+                # AMIX deprivileged (shadow MMU) through the boot menu:
+                # nextboot, reset, countdown; up to AMIX's banner
+                step = "nextboot"
+                shell("nextboot -pv unix_root:/stand/unix", rb"once")
+                amiga.send(b"reset\r")
+                amiga.expect(rb"menu: nextboot unix_root:/stand/unix", 120)
+                amiga.expect(rb"Booting \d+ in", 20)
                 step = "boot -pv"
-                amiga.send(b"boot -pv unix_root:\r")
                 amiga.expect(rb"starting AMIX deprivileged", 120)
                 time.sleep(25)
                 amiga.send(b"\x03")
@@ -330,7 +353,7 @@ def gdb_one(cpu, adf, gdb, elf="build/pvtest.elf", port=2345):
     amiga = Amiga(cpu, adf, log)
     step = "boot"
     try:
-        amiga.expect(re.escape(PROMPT), 120)
+        to_shell(amiga, 120)
         step = "pvtest stop"
         amiga.send(b"pvtest stop\r")
         amiga.expect(rb"ready, stopped", 20)

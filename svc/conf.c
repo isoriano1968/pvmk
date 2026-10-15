@@ -14,6 +14,8 @@ conf_defaults(struct conf *c)
 	c->timeout = 3;
 	c->loglevel = 2;
 	c->display = 1;
+	c->menu = 1;
+	c->fallback = 60;
 }
 
 static int
@@ -94,6 +96,42 @@ conf_line(struct conf *c, const char *k, u32 klen, const char *v, u32 vlen,
 		if (!parse_u32(v, vlen, &n) || n > 4)
 			goto bad;
 		c->loglevel = n;
+	} else if (streq("menu", k, klen)) {
+		if (streq("on", v, vlen))
+			c->menu = 1;
+		else if (streq("off", v, vlen))
+			c->menu = 0;
+		else
+			goto bad;
+	} else if (streq("fallback", k, klen)) {
+		if (!parse_u32(v, vlen, &n) || n > 3600)
+			goto bad;
+		c->fallback = n;
+	} else if (streq("entry", k, klen)) {
+		/* entry=label,dev:path[,pv|native] */
+		struct conf_entry *e;
+		u32 c1, c2;
+
+		for (c1 = 0; c1 < vlen && v[c1] != ','; c1++)
+			;
+		for (c2 = c1 + 1; c2 < vlen && v[c2] != ','; c2++)
+			;
+		if (c1 == 0 || c1 + 1 >= vlen || c2 == c1 + 1 ||
+		    c->nentries >= CONF_MAXENT)
+			goto bad;
+		e = &c->entry[c->nentries];
+		set_str(e->label, sizeof(e->label), v, c1);
+		set_str(e->target, sizeof(e->target), v + c1 + 1, c2 - c1 - 1);
+		e->mode = ENTRY_AUTO;
+		if (c2 < vlen) {
+			if (streq("pv", v + c2 + 1, vlen - c2 - 1))
+				e->mode = ENTRY_PV;
+			else if (streq("native", v + c2 + 1, vlen - c2 - 1))
+				e->mode = ENTRY_NATIVE;
+			else
+				goto bad;
+		}
+		c->nentries++;
 	} else {
 		kprintf("conf: line %u: unknown key ignored\n", lineno);
 	}
@@ -147,4 +185,9 @@ conf_show(const struct conf *c)
 	    c->display ? "on" : "off", c->keymap == KBD_DE ? "de" :
 	    c->keymap == KBD_DE_PC ? "de-pc" : "us", c->def,
 	    c->timeout, c->loglevel);
+	kprintf("menu=%s\nfallback=%u\n", c->menu ? "on" : "off", c->fallback);
+	for (u32 i = 0; i < c->nentries; i++)
+		kprintf("entry=%s,%s%s\n", c->entry[i].label, c->entry[i].target,
+		    c->entry[i].mode == ENTRY_PV ? ",pv" :
+		    c->entry[i].mode == ENTRY_NATIVE ? ",native" : "");
 }

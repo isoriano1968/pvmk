@@ -154,7 +154,7 @@ On real hardware: `target remote /dev/ttyUSB0` after `set serial baud 115200`.
 - M4 (in progress): `boot -pv unix_root:` starts AMIX deprivileged on a
   68030, with a shadow MMU built from AMIX's own page tables and a
   load-time PV patches (copyin/copyout, halt/reboot). In FS-UAE AMIX boots
-  to multi-user and login, slowly (every spl traps; M5 makes that fast).
+  to multi-user and login, slowly (every spl traps; M6 makes that fast).
   A reboot goes through SORIX-LDOM, which boots the kernel again. Break in
   with Ctrl + Left Amiga + Help (FS-UAE on a PC: Left Ctrl + Left Windows
   + End) or Ctrl-C on serial; `resume` gives AMIX its screen back. Shell aids:
@@ -162,8 +162,16 @@ On real hardware: `target remote /dev/ttyUSB0` after `set serial baud 115200`.
   `watch`. Not yet on 68040/68060 (AMIX's 2 KB pages).
 GDB's own m68k breakpoint (TRAP #15) is the hypercall, so breakpoints are
 ILLEGAL instructions the stub tells apart by address.
+- M5: a boot menu at every start (screen and serial): AMIX kernels on the
+  AMIX roots (or `entry=` lines in `pvmk.conf`), deprivileged or native,
+  a chooser for the kernels in `/stand`, the AmigaOS partition, the shell,
+  reboot; `default=` and `timeout=` give the countdown. `nextboot` boots a
+  kernel once (for testing); a non-default kernel that reboots quickly
+  falls back to the default. Kernels that do not fit the CPU (stock 030
+  kernel on a 68040/68060, 040/060 port kernel on a 68030) need a
+  confirmation.
 - Hard disk boot of SORIX-LDOM itself (`PVMK` partition, `pvinstall`) is
-  the last milestone (M10); the boot floppy is the boot medium until then.
+  the last milestone (M11); the boot floppy is the boot medium until then.
 
 ## Layout
 

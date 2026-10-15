@@ -29,14 +29,30 @@ struct bc_bootnode {
 	s8 pri;
 };
 
+#define CONF_MAXENT	8
+
+/* boot menu entry: entry=label,dev:path[,pv|native] */
+struct conf_entry {
+	char label[24];
+	char target[40];		/* dev[:path] */
+	u8 mode;			/* ENTRY_* */
+};
+#define ENTRY_AUTO	0		/* deprivileged if the MMU allows */
+#define ENTRY_PV	1
+#define ENTRY_NATIVE	2
+
 struct conf {
 	char serial[8];			/* debug | guest | shared */
 	u32 baud;
-	char def[32];			/* default personality */
+	char def[40];			/* default: entry label or dev[:path] */
 	u32 timeout;			/* autoboot seconds */
 	u32 loglevel;
 	u32 display;			/* text console on the screen */
 	u32 keymap;			/* KBD_US, KBD_DE */
+	u32 menu;			/* boot menu at startup */
+	u32 fallback;			/* seconds: a quicker reboot falls back */
+	u32 nentries;
+	struct conf_entry entry[CONF_MAXENT];
 };
 
 struct bootcap {

@@ -11,7 +11,7 @@
 #ifndef PVMK_LAYOUT_H
 #define PVMK_LAYOUT_H
 
-#define HOLE_SIZE	(256 * 1024)
+#define HOLE_SIZE	(320 * 1024)
 #define LOG_AREA_SIZE	(32 * 1024)
 #define SSTACK_SIZE	(16 * 1024)
 

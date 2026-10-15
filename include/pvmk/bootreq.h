@@ -16,4 +16,13 @@ void bootreq_set(u32 logarea, u32 kind, const char *name);
  * the request is cleared either way. 0 if none. */
 u32  bootreq_take(u32 logarea, char *name);
 
+/*
+ * Once-only next boot ("nextboot"): a boot menu target and mode, kept
+ * beside the boot request; stage0 leaves it alone, the boot menu takes
+ * it. An empty target clears it.
+ */
+void nextboot_set(u32 logarea, const char *target, u32 mode);
+/* 1 and target[40], *mode if one was pending; cleared either way */
+int  nextboot_take(u32 logarea, char *target, u32 *mode);
+
 #endif /* PVMK_BOOTREQ_H */

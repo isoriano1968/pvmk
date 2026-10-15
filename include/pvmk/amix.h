@@ -41,6 +41,8 @@ struct amix_kernel {
 	u32 lcopyin, lcopyout, sf_fault, u, haltsys;
 	u32 loadedcoplist;		/* its display's copper lists, for resume */
 	u32 execingcoplist;
+	/* 68040/68060 port kernels (amigaux.org): the loader sets cputype */
+	u32 cputype;
 };
 
 /* Deprivileged start: replace copy loops and haltsys with hypercalls

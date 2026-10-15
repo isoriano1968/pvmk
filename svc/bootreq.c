@@ -58,3 +58,66 @@ bootreq_take(u32 logarea, char *name)
 	r->sum = 0;
 	return kind;
 }
+
+/* ------------------------------------------------------------------ */
+/* nextboot                                                            */
+
+#define NEXTBOOT_OFFSET	192
+#define NEXTBOOT_MAGIC	0x4e584254	/* 'NXBT' */
+
+struct nextboot {
+	u32 magic;
+	u32 mode;
+	char target[40];
+	u32 sum;
+};
+
+static u32
+next_sum(const volatile struct nextboot *n)
+{
+	u32 s = n->magic + n->mode + 0x24681357, i;
+
+	for (i = 0; i < sizeof(n->target); i++)
+		s = s * 31 + (u8)n->target[i];
+	return s;
+}
+
+void
+nextboot_set(u32 logarea, const char *target, u32 mode)
+{
+	volatile struct nextboot *n =
+	    (volatile struct nextboot *)(logarea + NEXTBOOT_OFFSET);
+	u32 i;
+
+	if (!target || !*target) {
+		n->magic = 0;
+		n->sum = 0;
+		return;
+	}
+	n->magic = NEXTBOOT_MAGIC;
+	n->mode = mode;
+	for (i = 0; i < sizeof(n->target) - 1 && target[i]; i++)
+		n->target[i] = target[i];
+	for (; i < sizeof(n->target); i++)
+		n->target[i] = 0;
+	n->sum = next_sum(n);
+}
+
+int
+nextboot_take(u32 logarea, char *target, u32 *mode)
+{
+	volatile struct nextboot *n =
+	    (volatile struct nextboot *)(logarea + NEXTBOOT_OFFSET);
+	int ok = n->magic == NEXTBOOT_MAGIC && n->sum == next_sum(n);
+	u32 i;
+
+	if (ok) {
+		for (i = 0; i < sizeof(n->target); i++)
+			target[i] = n->target[i];
+		target[sizeof(n->target) - 1] = 0;
+		*mode = n->mode;
+	}
+	n->magic = 0;
+	n->sum = 0;
+	return ok;
+}
