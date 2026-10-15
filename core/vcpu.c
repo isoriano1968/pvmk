@@ -483,6 +483,24 @@ access_fault(struct excregs *r)
 	u32 sz = afault.size == 1 ? 0x10 : afault.size == 2 ? 0x20 : 0;
 
 	memset(f, 0, sizeof(f));
+	if (cpuinfo.model >= 40) {
+		/*
+		 * 68060 access error frame (format 4): fault address, FSLW
+		 * with read/write, size, user/supervisor data and PF; its
+		 * RTE restarts the instruction anyway.
+		 */
+		u32 fslw = (afault.write ? 0x00800000 : 0x01000000) |
+		    (afault.size == 1 ? 0x00200000 : afault.size == 2 ?
+		    0x00400000 : 0) | ((afault.fc & 7) << 16) | 0x00000200;
+
+		f[4] = (u16)(afault.va >> 16);
+		f[5] = (u16)afault.va;
+		f[6] = (u16)(fslw >> 16);
+		f[7] = (u16)fslw;
+		afault.faulted = 0;
+		reflect_frame(r, VEC_BUSERR, (const u8 *)f, 4, -1);
+		return;
+	}
 	f[4] = AF_MAGIC1;
 	f[5] = (u16)(0x0100 | (afault.write ? 0 : 0x0040) | sz | afault.fc);
 	f[6] = rd16(r->pc);			/* stage C: the opcode */
@@ -607,6 +625,9 @@ movec(struct excregs *r, u16 op, u32 *pc)
 		*p = *rn;
 		if (cr == 0x002 && (*rn & 0x0808))	/* 030 cache clear bits */
 			cache_push_all(cpuinfo.model);
+		if (m >= 40 && (cr == 0x003 || (cr >= 0x004 && cr <= 0x007) ||
+		    cr == 0x806 || cr == 0x807))
+			vmmu_flush();		/* new MMU state: TC, TTs, roots */
 	} else
 		*rn = *p;
 	return 0;
@@ -814,8 +835,8 @@ rte(struct excregs *r)
 		r->pc = pc;
 		return 0;
 	}
-	if (fmt == 0xa || fmt == 0xb) {
-		if (cpuinfo.model != 30)
+	if (fmt == 0xa || fmt == 0xb || fmt == 7) {
+		if ((cpuinfo.model == 30) != (fmt != 7))
 			return FAULT;
 		for (i = 0; i < size; i += 2)
 			fr[i / 2] = rd16(sp + i);
@@ -825,13 +846,13 @@ rte(struct excregs *r)
 		if (afault.faulted)
 			return 0;		/* frame not readable */
 		fr[0] = real_sr(r);
-		fr[5] &= (u16)~4;		/* the rerun is a user cycle */
+		fr[fmt == 7 ? 6 : 5] &= (u16)~4;	/* a user cycle again */
 		save_ctx(r);
 		guest.n_emul++;
 		vmmu_activate();
 		vcpu_enter_frame(&guest.ctx, fr, size, sstack_top());
 	}
-	if (fmt != 0 && fmt != 2) {
+	if (fmt != 0 && fmt != 2 && fmt != 4) {	/* 4: 68060 restarts */
 		kprintf("vcpu: RTE with frame format %x not supported yet\n",
 		    fmt);
 		return FAULT;
@@ -1015,7 +1036,13 @@ emulate(struct excregs *r)
 	} else if ((op & 0xffd8) == 0xf548 && cpuinfo.model == 40) {
 		guest.mmusr40 = 0;			/* PTEST */
 	} else if ((op & 0xffb8) == 0xf588 && cpuinfo.model == 60) {
-		/* PLPA: identity mapping, address unchanged */
+		/* PLPAR/PLPAW (An): the guest's physical address, in An */
+		u32 pa, *an = &r->a[op & 7];
+		int sup = (guest.dfc & 4) != 0;
+
+		if (vmmu_translate(*an, sup, !(op & 0x0040), &pa))
+			return FAULT;
+		*an = pa;
 	} else
 		return FAULT;
 	if (op != 0x4e73)
@@ -1250,12 +1277,18 @@ vcpu_exception(struct excregs *r)
 			r->sr |= VSR_T1;		/* watchpoint: one step */
 		return;
 	} else if (vec == VEC_BUSERR && ((r->fmtvec >> 12) == 0xa ||
-	    (r->fmtvec >> 12) == 0xb)) {
+	    (r->fmtvec >> 12) == 0xb || (r->fmtvec >> 12) == 4 ||
+	    (r->fmtvec >> 12) == 7)) {
 		/*
 		 * The guest sees the function code of its own mode: the
-		 * CPU ran it in user mode, its kernel runs with virtual S.
+		 * CPU ran it in user mode, its kernel runs with virtual S
+		 * (68030 SSW FC bit 2; 68060 FSLW TM bit 2, bit 18).
 		 */
-		if (guest.vsr & VSR_S)
+		if ((guest.vsr & VSR_S) && (r->fmtvec >> 12) == 4)
+			*(u32 *)((u8 *)&r->sr + 0x0c) |= 0x00040000;
+		else if ((guest.vsr & VSR_S) && (r->fmtvec >> 12) == 7)
+			*((u16 *)&r->sr + 6) |= 4;	/* SSW TM: supervisor */
+		else if (guest.vsr & VSR_S)
 			*((u16 *)&r->sr + 5) |= 4;	/* SSW FC: supervisor */
 		reflect(r, vec, 1, -1);
 		/*

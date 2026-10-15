@@ -763,6 +763,24 @@ T1, continue, detach, kill, noack, guest console as `O` packets); `make test`
 drives gdb-multiarch against pvtest on 030/040/060. Not yet: stub for pvmk
 itself, `$`-packet auto switch, `monitor` commands, watchpoints.
 M3 complete in FS-UAE; real-A3000 confirmation pending.
+M7 in progress (FS-UAE): shadow MMU for the 68040 and 68060. The shadow
+geometry is per CPU family (68030 8/8/5 with 2 KB pages; 68040/68060
+7/7/6 with 4 KB pages, aligned tables; the descriptor bits used are the
+same); SORIX-LDOM sits behind supervisor-only DTT0 (low 16 MB, precise
+non-cacheable), DTT1 and ITT0 (cacheable); the guest runs through URP.
+Guest side: TC (E, P), URP/SRP, ITT/DTT (S field, CM, W) walked in
+software, resident/indirect descriptors, U/M kept, PLPA translated.
+Access errors: 68060 format 4 (fault address, FSLW; restart), 68040
+format 7 (restart; for shadow misses SORIX-LDOM completes the pending
+write-backs WB3/WB2/WB1 through the guest's tables); reflected frames
+carry the supervisor TM bit for faults of the guest's kernel; the
+guest's RTE of a format 7 frame goes back to the CPU, of format 4 is a
+restart. The PFLUSH revalidation works for both geometries. pvtest
+gained MMU tests (own tables in chip RAM: read through the tables,
+write-protect fault fixed and rerun, invalid page mapped and rerun,
+PTEST on the 68030, translation off), passing on 68030, 68040 and
+68060; on the 68040 the handler completes write-backs like a real OS.
+Next: AMIX 040/060 port kernel deprivileged (A1), real hardware.
 M6 in progress (68030, FS-UAE). Measured on the time from `boot -pv` to
 AMIX's login screen (fresh copy of a clean disk): 148 s before M6.
 `guest stats` profiles the emulated instructions and the shadow. Done:

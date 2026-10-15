@@ -1,11 +1,13 @@
 /*
  * Shadow MMU ("virtual TLB") for the guest.
  *
- * The guest sees a 68030 PMMU (TC, CRP, SRP, TT0/TT1, MMUSR, PFLUSH,
- * PTEST) and builds its own tables, which SORIX-LDOM never installs.
- * The real MMU translates the guest (always in real user mode) through
- * shadow tables with a fixed geometry (8/8/5 index bits, 2 KB pages),
- * filled on demand from the guest's tables:
+ * The guest sees the MMU of the real CPU: a 68030 PMMU (TC, CRP, SRP,
+ * TT0/TT1, MMUSR, PFLUSH, PTEST) or a 68040/68060 MMU (TC, URP, SRP,
+ * ITT/DTT, PFLUSH, PTEST/PLPA), and builds its own tables, which
+ * SORIX-LDOM never installs. The real MMU translates the guest (always in
+ * real user mode) through shadow tables of a fixed geometry (68030: 8/8/5
+ * index bits, 2 KB pages; 68040/68060: 7/7/6, 4 KB pages), filled on
+ * demand from the guest's tables:
  *
  *  - two views, chosen by the virtual S bit: kernel (guest SRP if SRE,
  *    else CRP; supervisor-only pages accessible) and user (guest CRP;
@@ -19,9 +21,11 @@
  *    shadow tables;
  *  - SORIX-LDOM's hole is never mapped.
  *
- * SORIX-LDOM itself runs with TT0 covering everything for supervisor
- * function codes, so its own accesses are physical and never fault.
- * 68030 only so far; on the 68040/68060 the guest runs untranslated.
+ * SORIX-LDOM itself runs with transparent translation covering everything
+ * for supervisor accesses (68030 TT0; 68040/68060 DTT0/DTT1/ITT0), so its
+ * own accesses are physical and never fault. Access errors: 68030 frames
+ * A/B (rerun), 68060 format 4 (restart), 68040 format 7 (restart, with
+ * the pending write-backs completed by SORIX-LDOM for shadow misses).
  */
 #ifndef PVMK_VMMU_H
 #define PVMK_VMMU_H
@@ -75,5 +79,9 @@ void mmu030_load(const u32 *crp, u32 tc, u32 tt0);
 void mmu030_root(const u32 *crp);	/* new CRP, flush the ATC */
 void mmu030_flush(void);		/* PFLUSHA */
 void mmu030_off(void);
+void mmu040_load(u32 urp, u32 tc, u32 dtt0, u32 dtt1, u32 itt0);
+void mmu040_root(u32 urp);		/* new URP, flush the ATCs */
+void mmu040_flush(void);		/* PFLUSHA */
+void mmu040_off(void);
 
 #endif /* PVMK_VMMU_H */

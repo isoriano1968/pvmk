@@ -15,6 +15,18 @@
 	.set	HC_MAGIC,	0x534f5258
 	.set	INTENA,		0xdff09a
 	.set	INTREQ,		0xdff09c
+	/* MMU tests: tables and pages in chip RAM above pvtest */
+	.set	TAB_A,		0x70000		/* 68030: 256 x 4 */
+	.set	TAB_B,		0x70400		/* 256 x 4 */
+	.set	TAB_C,		0x70800		/* 16 x 4 */
+	.set	ROOT40,		0x70000		/* 68040/68060: 128 x 4 */
+	.set	PTR40,		0x70200		/* 128 x 4 */
+	.set	PT40,		0x70400		/* 64 x 4 */
+	.set	PG0,		0x78000
+	.set	PG1,		0x79000
+	.set	VA_T,		0x40000000	/* the test window */
+	.set	PAT0,		0x5a5a0000
+	.set	PAT1,		0xa5a50001
 
 	.macro	HCALL n
 	moveq	#\n,%d0
@@ -176,11 +188,105 @@ back:	tst.b	ucheck
 	move.l	tcread,%d0
 	cmp.l	tcval,%d0
 	bra.s	2f
-1:	move.l	#0x0000c000,%d0
+1:	move.l	#0x00004000,%d0			/* P (8 KB), E off */
 	.short	0x4e7b,0x0003			/* movec %d0,%tc */
 	.short	0x4e7a,0x1003			/* movec %tc,%d1 */
 	cmp.l	%d0,%d1
 2:	RESULT	n_mmu, eq
+
+	/* --- translation through the guest's own tables --- */
+	cmp.l	#30,cpu
+	bne	mmu040_test
+	bsr	mmu030_tables
+	lea	h_buserr(%pc),%a1
+	move.l	%a1,vectors+2*4
+	clr.l	nfaults
+	lea	crp030,%a0
+	.short	0xf010,0x4c00			/* pmove (%a0),%crp */
+	.short	0xf000,0x2400			/* pflusha */
+	lea	tc030,%a0
+	.short	0xf010,0x4000			/* pmove (%a0),%tc */
+	move.l	VA_T,%d0			/* mapped page 0 */
+	cmp.l	#PAT0,%d0
+	RESULT	n_mmuread, eq
+	move.l	#0x11223344,VA_T+4		/* write-protected: fixed */
+	cmp.l	#0x11223344,PG0+4		/*  by the handler, rerun */
+	bne.s	1f
+	cmp.l	#1,nfaults
+	bne.s	1f
+	cmp.l	#VA_T+4,faddr
+1:	RESULT	n_mmuwp, eq
+	move.l	VA_T+0x1000,%d0			/* invalid page 1: mapped */
+	cmp.l	#PAT1,%d0			/*  by the handler */
+	bne.s	1f
+	cmp.l	#2,nfaults
+	bne.s	1f
+	cmp.l	#VA_T+0x1000,faddr
+1:	RESULT	n_mmuinval, eq
+	lea	VA_T,%a0			/* ptest: mapped, then invalid */
+	.short	0xf010,0x9e15			/* ptestr #5,(%a0),#7 */
+	.short	0xf039,0x6200			/* pmove %psr,mmusr */
+	.long	mmusr
+	move.w	mmusr,%d0
+	and.w	#0x0400,%d0			/* I */
+	bne.s	1f
+	lea	VA_T+0x2000,%a0
+	.short	0xf010,0x9e15
+	.short	0xf039,0x6200
+	.long	mmusr
+	move.w	mmusr,%d0
+	and.w	#0x0400,%d0
+	cmp.w	#0x0400,%d0
+1:	RESULT	n_mmuptest, eq
+	lea	tcoff,%a0
+	.short	0xf010,0x4000			/* pmove (%a0),%tc: off */
+	.short	0xf000,0x2400			/* pflusha */
+	move.l	PG0+4,%d0			/* identity again */
+	cmp.l	#0x11223344,%d0
+	RESULT	n_mmuoff, eq
+	bra	8f
+
+	/* 68040/68060: low 16 MB through DTT0/ITT0, VA_T through tables */
+mmu040_test:
+	bsr	mmu040_tables
+	lea	h_buserr(%pc),%a1
+	move.l	%a1,vectors+2*4
+	clr.l	nfaults
+	move.l	#0x0000c000,%d0			/* 00xxxxxx, any FC, cached */
+	.short	0x4e7b,0x0006			/* movec %d0,%dtt0 */
+	.short	0x4e7b,0x0004			/* movec %d0,%itt0 */
+	move.l	#ROOT40,%d0
+	.short	0x4e7b,0x0806			/* movec %d0,%urp */
+	.short	0x4e7b,0x0807			/* movec %d0,%srp */
+	.short	0xf518				/* pflusha */
+	move.l	#0x00008000,%d0			/* E, 4 KB pages */
+	.short	0x4e7b,0x0003			/* movec %d0,%tc */
+	move.l	VA_T,%d0
+	cmp.l	#PAT0,%d0
+	RESULT	n_mmuread, eq
+	move.l	#0x11223344,VA_T+4
+	cmp.l	#0x11223344,PG0+4
+	bne.s	1f
+	cmp.l	#1,nfaults
+	bne.s	1f
+	cmp.l	#VA_T+4,faddr
+1:	RESULT	n_mmuwp, eq
+	move.l	VA_T+0x1000,%d0
+	cmp.l	#PAT1,%d0
+	bne.s	1f
+	cmp.l	#2,nfaults
+	bne.s	1f
+	cmp.l	#VA_T+0x1000,faddr
+1:	RESULT	n_mmuinval, eq
+	moveq	#0,%d0
+	.short	0x4e7b,0x0003			/* movec %d0,%tc: off */
+	.short	0x4e7b,0x0006			/* dtt0 */
+	.short	0x4e7b,0x0004			/* itt0 */
+	.short	0xf518				/* pflusha */
+	move.l	PG1,%d0				/* identity again */
+	cmp.l	#PAT1,%d0
+	RESULT	n_mmuoff, eq
+8:
 
 	/* --- interrupts: vertical blank, level 3 --- */
 	clr.l	vblanks
@@ -237,6 +343,151 @@ back:	tst.b	ucheck
 	bra.s	1b
 9:	move.l	fails,%d1
 	HCALL	HC_EXIT
+
+/*
+ * 68030 tables for the MMU tests (in chip RAM above pvtest): 4 KB pages,
+ * TIA 8 / TIB 8 / TIC 4; level A maps every 16 MB identically (early
+ * termination) except VA_T's, which goes through B and C: page 0 of the
+ * window is PG0, write-protected; page 1 is invalid until a fault maps it
+ * to PG1.
+ */
+mmu030_tables:
+	lea	TAB_A,%a0
+	moveq	#0,%d0
+	move.w	#255,%d1
+1:	move.l	%d0,%d2
+	or.l	#1,%d2				/* page descriptor: identity */
+	move.l	%d2,(%a0)+
+	add.l	#0x01000000,%d0
+	dbf	%d1,1b
+	move.l	#TAB_B+2,TAB_A+(VA_T>>24)*4	/* short table */
+	lea	TAB_B,%a0
+	move.w	#255+16,%d1
+1:	clr.l	(%a0)+				/* B (256) and C (16): invalid */
+	dbf	%d1,1b
+	move.l	#TAB_C+2,TAB_B
+	move.l	#PG0+5,TAB_C			/* page, write-protected */
+	move.l	#PAT0,PG0
+	move.l	#PAT1,PG1
+	clr.l	PG0+4
+	rts
+
+/* --- handlers (run in virtual supervisor mode) --- */
+
+/*
+ * Bus/access error from the MMU tests: note the fault address, fix the
+ * mapping and return to rerun or restart the access. The fault address
+ * is at +0x10 in 68030 frames (format A, B), +0x14 in 68040 frames (7),
+ * +8 in 68060 frames (4).
+ */
+h_buserr:
+	movem.l	%d0/%a0,-(%sp)
+	addq.l	#1,nfaults
+	move.w	8+6(%sp),%d0			/* format */
+	lsr.w	#8,%d0
+	lsr.w	#4,%d0
+	lea	8+0x10(%sp),%a0
+	cmp.w	#7,%d0
+	bne.s	1f
+	lea	8+0x14(%sp),%a0
+1:	cmp.w	#4,%d0
+	bne.s	1f
+	lea	8+8(%sp),%a0
+1:	move.l	(%a0),%d0
+	move.l	%d0,faddr
+	and.l	#0xfffff000,%d0
+	cmp.l	#VA_T,%d0
+	bne.s	2f
+	bsr	mmu_fix_wp			/* page 0: clear WP */
+	bra.s	3f
+2:	cmp.l	#VA_T+0x1000,%d0
+	bne.s	9f
+	bsr	mmu_map_p1			/* page 1: map it */
+3:	move.w	8+6(%sp),%d0			/* 68040: complete the */
+	and.w	#0xf000,%d0			/*  pending write-backs */
+	cmp.w	#0x7000,%d0
+	bne.s	4f
+	lea	8(%sp),%a0
+	bsr	wb040
+4:	movem.l	(%sp)+,%d0/%a0
+	rte
+9:	movem.l	(%sp)+,%d0/%a0
+	bra	unexpected
+
+/*
+ * 68040 access error frame at a0: do the valid write-backs WB3, WB2, WB1
+ * (status +0x0E/+0x10/+0x12, address and data +0x18/+0x1C, +0x20/+0x24,
+ * +0x28/+0x2C) and clear their valid bits, as the CPU does not.
+ */
+wb040:
+	movem.l	%d0-%d2/%a1-%a2,-(%sp)
+	moveq	#0x0e,%d1			/* WB3 */
+	moveq	#0x18,%d2
+	bsr.s	1f
+	moveq	#0x10,%d1			/* WB2 */
+	moveq	#0x20,%d2
+	bsr.s	1f
+	moveq	#0x12,%d1			/* WB1 */
+	moveq	#0x28,%d2
+	bsr.s	1f
+	movem.l	(%sp)+,%d0-%d2/%a1-%a2
+	rts
+1:	move.w	(%a0,%d1.w),%d0			/* status */
+	btst	#7,%d0
+	beq.s	9f
+	bclr	#7,1(%a0,%d1.w)
+	move.l	(%a0,%d2.w),%a1			/* address */
+	lea	4(%a0,%d2.w),%a2		/* data */
+	lsr.w	#5,%d0
+	and.w	#3,%d0
+	cmp.w	#1,%d0
+	beq.s	2f
+	cmp.w	#2,%d0
+	beq.s	3f
+	move.l	(%a2),(%a1)			/* long */
+	rts
+2:	move.b	3(%a2),(%a1)			/* byte */
+	rts
+3:	move.w	2(%a2),(%a1)			/* word */
+9:	rts
+
+mmu_fix_wp:
+	cmp.l	#30,cpu
+	bne.s	1f
+	move.l	#PG0+1,TAB_C
+	.short	0xf000,0x2400			/* pflusha */
+	rts
+1:	move.l	#PG0+1,PT40
+	.short	0xf518				/* pflusha (68040/68060) */
+	rts
+
+mmu_map_p1:
+	cmp.l	#30,cpu
+	bne.s	1f
+	move.l	#PG1+1,TAB_C+4
+	.short	0xf000,0x2400			/* pflusha */
+	rts
+1:	move.l	#PG1+1,PT40+4
+	.short	0xf518
+	rts
+
+/*
+ * 68040/68060 tables, 4 KB pages: root (128) and pointer (128) tables,
+ * one page table (64) for VA_T: page 0 PG0 write-protected, page 1
+ * invalid until a fault maps it.
+ */
+mmu040_tables:
+	lea	ROOT40,%a0
+	move.w	#128+128+64-1,%d1
+1:	clr.l	(%a0)+
+	dbf	%d1,1b
+	move.l	#PTR40+2,ROOT40+(VA_T>>25)*4	/* resident */
+	move.l	#PT40+2,PTR40
+	move.l	#PG0+5,PT40			/* resident, W */
+	move.l	#PAT0,PG0
+	move.l	#PAT1,PG1
+	clr.l	PG0+4
+	rts
 
 /* --- handlers (run in virtual supervisor mode) --- */
 h_trap3:
@@ -336,10 +587,21 @@ n_irq:		.asciz	"vertical blank interrupts delivered"
 n_irqmask:	.asciz	"masked interrupts held back"
 n_stop:		.asciz	"stop with all interrupts masked"
 n_idle:		.asciz	"stop waits for an interrupt"
+n_mmuread:	.asciz	"mmu: read through the guest's tables"
+n_mmuwp:	.asciz	"mmu: write-protect fault, fixed, rerun"
+n_mmuinval:	.asciz	"mmu: invalid page fault, mapped, rerun"
+n_mmuptest:	.asciz	"mmu: ptest (mapped, invalid)"
+n_mmuoff:	.asciz	"mmu: translation off again"
 
 	.data
 	.balign	4
 tcval:		.long	0x00c07760
+tc030:		.long	0x80c08840		/* E, 4K, TIA 8 TIB 8 TIC 4 */
+tcoff:		.long	0
+crp030:		.long	0x7fff0002, TAB_A	/* short descriptors */
+nfaults:	.long	0
+faddr:		.long	0
+mmusr:		.word	0
 tcread:		.long	0
 cpu:		.long	0
 flag:		.long	0

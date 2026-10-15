@@ -180,3 +180,51 @@ mmu030_off:
 	.short	0xf000,0x2400			/* pflusha */
 	addq.l	#4,%sp
 	rts
+
+/*
+ * 68040/68060 MMU for the shadow tables (MOVEC and PFLUSHA as .short).
+ *
+ * void mmu040_load(u32 urp, u32 tc, u32 dtt0, u32 dtt1, u32 itt0)
+ * SORIX-LDOM's transparent translation first, then the root and TC.
+ */
+	.globl	mmu040_load, mmu040_root, mmu040_flush, mmu040_off
+mmu040_load:
+	move.l	12(%sp),%d0
+	.short	0x4e7b,0x0006			/* movec %d0,%dtt0 */
+	move.l	16(%sp),%d0
+	.short	0x4e7b,0x0007			/* movec %d0,%dtt1 */
+	move.l	20(%sp),%d0
+	.short	0x4e7b,0x0004			/* movec %d0,%itt0 */
+	moveq	#0,%d0
+	.short	0x4e7b,0x0005			/* movec %d0,%itt1 */
+	move.l	4(%sp),%d0
+	.short	0x4e7b,0x0806			/* movec %d0,%urp */
+	.short	0x4e7b,0x0807			/* movec %d0,%srp (unused) */
+	.short	0xf518				/* pflusha */
+	move.l	8(%sp),%d0
+	.short	0x4e7b,0x0003			/* movec %d0,%tc */
+	.short	0xf518
+	rts
+
+/* void mmu040_root(u32 urp): new user root, flush the ATCs */
+mmu040_root:
+	move.l	4(%sp),%d0
+	.short	0x4e7b,0x0806			/* movec %d0,%urp */
+	.short	0xf518				/* pflusha */
+	rts
+
+/* void mmu040_flush(void) */
+mmu040_flush:
+	.short	0xf518				/* pflusha */
+	rts
+
+/* void mmu040_off(void): translation and transparent translation off */
+mmu040_off:
+	moveq	#0,%d0
+	.short	0x4e7b,0x0003			/* movec %d0,%tc */
+	.short	0x4e7b,0x0004			/* itt0 */
+	.short	0x4e7b,0x0005			/* itt1 */
+	.short	0x4e7b,0x0006			/* dtt0 */
+	.short	0x4e7b,0x0007			/* dtt1 */
+	.short	0xf518				/* pflusha */
+	rts

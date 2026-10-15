@@ -23,20 +23,39 @@
 #define DT_LONG		3
 
 /*
- * Shadow geometry: TIA 8, TIB 8, TIC 5, 2 KB pages. Short descriptors.
- * TC = E | PS 2K | IS 0 | 8/8/5.
+ * Shadow geometry, by CPU family (set in vmmu_reset):
+ *  68030: TIA 8, TIB 8, TIC 5, 2 KB pages, short descriptors;
+ *         TC = E | PS 2K | IS 0 | 8/8/5. SORIX-LDOM: TT0 = everything for
+ *         supervisor function codes.
+ *  68040/68060: 7/7/6, 4 KB pages (TC = E). SORIX-LDOM: supervisor-only
+ *         transparent translation, DTT0 the low 16 MB (chip RAM, I/O)
+ *         non-cacheable, DTT1 and ITT0 everything else cacheable
+ *         (write-through), so its accesses stay coherent with the guest's
+ *         cached data (the caches are physical).
+ * The descriptor bits used are the same in both formats: table 2, page 1,
+ * WP/W bit 2, U bit 3, M bit 4, no-cache 0x40 (CI / CM precise).
  */
 #define SH_TC		0x80b08850
-#define SH_PAGE		2048
-#define SH_L1		256
-#define SH_L2		256
-#define SH_L3		32
-/* TT0 for SORIX-LDOM: all addresses, supervisor FCs (4-7), read and write */
-#define SH_TT0		0x00ff8143
+#define SH_TT0		0x00ff8143	/* all addresses, FC 4-7, R and W */
+#define SH_TC40		0x00008000	/* E, 4 KB pages */
+#define SH_DTT0_40	0x0000a040	/* 00xxxxxx, supervisor, precise */
+#define SH_DTT1_40	0x00ffa000	/* all, supervisor, write-through */
+#define SH_ITT0_40	0x00ffa000
+
+static u32 sh_page, sh_n1, sh_n2, sh_n3;	/* page size, entries per level */
+static u32 sh_s1, sh_s2, sh_s3;		/* index shifts */
+static u32 sh_al1, sh_al3;		/* table alignment (L1/L2, L3) */
+#define SH_PAGE		sh_page
+#define SH_L1		sh_n1
+#define SH_L2		sh_n2
+#define SH_L3		sh_n3
+#define I1(va)		((va) >> sh_s1)
+#define I2(va)		(((va) >> sh_s2) & (sh_n2 - 1))
+#define I3(va)		(((va) >> sh_s3) & (sh_n3 - 1))
 
 #define POOL_SIZE	(64 * 1024)
 
-static u8 pool[POOL_SIZE] __attribute__((aligned(16)));
+static u8 pool[POOL_SIZE] __attribute__((aligned(512)));
 static u32 pool_used;
 
 /*
@@ -57,14 +76,15 @@ struct l3meta {
 	u32 *l2e;			/* the L2 entry pointing to it */
 	u8 view, uniform, nup, pad;
 	u32 up_a[MAXPATH - 1], up_v[MAXPATH - 1];
-	u32 pd_a[32], pd_v[32];		/* 0: made without a guest table */
+	u32 pd_a[64], pd_v[64];		/* 0: made without a guest table */
 };
-#define L3SIZE		((SH_L3 * 4 + sizeof(struct l3meta) + 15) & ~15u)
+#define L3SIZE		((SH_L3 * 4 + sizeof(struct l3meta) + 15) & ~15u)	/* runtime */
 static struct l3meta *l3list[NL3];
 static u32 nl3;
 static u32 *l3free;			/* recycled L3 blocks */
 static u32 n_kept, n_dropped, n_pflush;
 static void l3_release(u32 i);
+static int fault040(struct excregs *r);
 
 static u32
 dsig(u32 a)				/* a guest descriptor's value */
@@ -98,9 +118,48 @@ tlb_clear(struct view *v)
 		v->tlb[i].va = 1;
 }
 
-static struct view views[2];		/* 0 user, 1 kernel */
+/* views[2] (above): 0 user, 1 kernel */
 static int loaded = -1;			/* view in the real CRP, -1 MMU off */
 static u32 n_flush_user;
+static struct view views[2];
+
+/* the real MMU, per CPU family */
+static void
+mmu_load(int v)
+{
+	if (cpuinfo.model == 30)
+		mmu030_load(views[v].crp, SH_TC, SH_TT0);
+	else
+		mmu040_load(views[v].crp[1], SH_TC40, SH_DTT0_40, SH_DTT1_40,
+		    SH_ITT0_40);
+}
+
+static void
+mmu_root(int v)
+{
+	if (cpuinfo.model == 30)
+		mmu030_root(views[v].crp);
+	else
+		mmu040_root(views[v].crp[1]);
+}
+
+static void
+mmu_flush(void)
+{
+	if (cpuinfo.model == 30)
+		mmu030_flush();
+	else
+		mmu040_flush();
+}
+
+static void
+mmu_off(void)
+{
+	if (cpuinfo.model == 30)
+		mmu030_off();
+	else
+		mmu040_off();
+}
 static int enabled;			/* shadow active (68030) */
 static u32 n_fill, n_wp, n_guestfault, n_flush, n_reset;
 
@@ -144,10 +203,11 @@ pwr(u32 pa, u32 v)
 }
 
 static void *
-pool_alloc(u32 size)
+pool_alloc_al(u32 size, u32 al)
 {
 	void *p;
 
+	pool_used = (pool_used + al - 1) & ~(al - 1);
 	if (pool_used + size > POOL_SIZE)
 		return NULL;
 	p = pool + pool_used;
@@ -155,6 +215,8 @@ pool_alloc(u32 size)
 	memset(p, 0, size);
 	return p;
 }
+
+#define pool_alloc_tab()	pool_alloc_al(SH_L1 * 4, sh_al1)	/* L1, L2 */
 
 /* Drop all shadow tables and start again with empty roots. */
 static void
@@ -166,13 +228,13 @@ shadow_clear(void)
 	nl3 = 0;
 	l3free = NULL;
 	for (i = 0; i < 2; i++) {
-		views[i].l1 = pool_alloc(SH_L1 * 4);
+		views[i].l1 = pool_alloc_tab();
 		views[i].crp[0] = 0x7fff0002;	/* upper limit 7fff, short */
 		views[i].crp[1] = (u32)(uintptr_t)views[i].l1;
 		tlb_clear(&views[i]);
 	}
 	if (loaded >= 0)
-		mmu030_root(views[loaded].crp);	/* the old tables are gone */
+		mmu_root(loaded);	/* the old tables are gone */
 }
 
 /* 4 KB aligned scratch memory for the boot-time MMU self-test */
@@ -187,13 +249,31 @@ vmmu_scratch(u32 size)
 void
 vmmu_reset(void)
 {
-	enabled = cpuinfo.model == 30 && cpuinfo.mmu_ok;
+	enabled = cpuinfo.mmu_ok && cpuinfo.model >= 30;
+	if (cpuinfo.model == 30) {
+		sh_page = 2048;
+		sh_n1 = sh_n2 = 256;
+		sh_n3 = 32;
+		sh_s1 = 24;
+		sh_s2 = 16;
+		sh_s3 = 11;
+		sh_al1 = sh_al3 = 16;
+	} else {
+		sh_page = 4096;
+		sh_n1 = sh_n2 = 128;
+		sh_n3 = 64;
+		sh_s1 = 25;
+		sh_s2 = 18;
+		sh_s3 = 12;
+		sh_al1 = 512;
+		sh_al3 = 256;
+	}
 	n_fill = n_wp = n_guestfault = n_flush = nflog = n_flush_user = 0;
 	n_pflush = n_kept = n_dropped = 0;
 	n_reset++;
 	shadow_clear();
 	if (loaded >= 0)
-		mmu030_flush();
+		mmu_flush();
 }
 
 void
@@ -202,7 +282,7 @@ vmmu_flush(void)
 	n_flush++;
 	shadow_clear();
 	if (loaded >= 0)
-		mmu030_root(views[loaded].crp);
+		mmu_root(loaded);
 }
 
 /*
@@ -226,14 +306,14 @@ vmmu_flush_user(void)
 			l3_release(i);
 		else
 			i++;
-	if (!(v->l1 = pool_alloc(SH_L1 * 4))) {
+	if (!(v->l1 = pool_alloc_tab())) {
 		vmmu_flush();			/* pool full: start over */
 		return;
 	}
 	v->crp[1] = (u32)(uintptr_t)v->l1;
 	tlb_clear(v);
 	if (loaded >= 0)
-		mmu030_root(views[loaded].crp);
+		mmu_root(loaded);
 }
 
 /*
@@ -280,7 +360,7 @@ vmmu_pflush(void)
 	tlb_clear(&views[0]);
 	tlb_clear(&views[1]);
 	if (loaded >= 0)
-		mmu030_flush();
+		mmu_flush();
 }
 
 void
@@ -291,9 +371,9 @@ vmmu_activate(void)
 	if (!enabled || loaded == v)
 		return;
 	if (loaded < 0)
-		mmu030_load(views[v].crp, SH_TC, SH_TT0);
+		mmu_load(v);
 	else
-		mmu030_root(views[v].crp);
+		mmu_root(v);
 	loaded = v;
 }
 
@@ -301,7 +381,7 @@ void
 vmmu_off(void)
 {
 	if (loaded >= 0)
-		mmu030_off();
+		mmu_off();
 	loaded = -1;
 }
 
@@ -317,6 +397,129 @@ struct walk {
 	/* the descriptors used, root first (address | 1 if long) */
 	u32 npath, path[MAXPATH];
 };
+
+/* 68040/68060 ITTx/DTTx match: base/mask, E, S field (user/super/both) */
+static int
+tt40_match(u32 tt, u32 va, u32 fc)
+{
+	u32 base = tt >> 24, mask = (tt >> 16) & 0xff, sf = (tt >> 13) & 3;
+
+	if (!(tt & 0x8000))
+		return 0;
+	if (((va >> 24) & ~mask & 0xff) != (base & ~mask))
+		return 0;
+	if ((sf == 0 && (fc & 4)) || (sf == 1 && !(fc & 4)))
+		return 0;
+	return 1;
+}
+
+/*
+ * The guest's 68040/68060 tables: TC E (bit 15), P (8 KB pages, bit 14);
+ * URP/SRP; root (7 bits) and pointer (7 bits) descriptors resident if
+ * UDT bit 1; page descriptors resident if PDT bit 0, indirect if PDT 2;
+ * W bit 2, U 3, M 4, CM 6-5, S 7. ITTx (program FCs) and DTTx (data)
+ * translate transparently. Returns MMUSR bits in the 68030 sense
+ * (I, W, S, B, T) for the shared callers.
+ */
+static u16
+walk040(u32 va, u32 fc, int write, int update, struct walk *w)
+{
+	u32 tc = guest.tcr, big = (tc & 0x4000) != 0, ea, d, tt0, tt1;
+	int s = 0;
+	u16 sr = 0;
+
+	if ((fc & 3) == 2) {			/* program space: ITTs */
+		tt0 = guest.itt0;
+		tt1 = guest.itt1;
+	} else {
+		tt0 = guest.dtt0;
+		tt1 = guest.dtt1;
+	}
+	if (tt40_match(tt0, va, fc) || tt40_match(tt1, va, fc)) {
+		u32 tt = tt40_match(tt0, va, fc) ? tt0 : tt1;
+
+		sr = MMUSR_T;
+		w->ci = ((tt >> 5) & 3) >= 2;
+		if ((tt & 4) && write)
+			w->wp = 1, sr |= MMUSR_W;
+		goto phys;
+	}
+	if (!(tc & 0x8000))
+		goto phys;
+	/* root */
+	ea = (((fc & 4) ? guest.srp40 : guest.urp) & ~0x1ffu) + (va >> 25) * 4;
+	d = prd(ea);
+	w->path[w->npath++] = ea;
+	w->desc = ea;
+	w->levels++;
+	if (!(d & 2)) {
+		sr |= MMUSR_I;
+		goto done;
+	}
+	if (update && !(d & D_U))
+		pwr(ea, d |= D_U);
+	if (d & D_WP)
+		w->wp = 1;
+	/* pointer */
+	ea = (d & ~0x1ffu) + ((va >> 18) & 0x7f) * 4;
+	d = prd(ea);
+	w->path[w->npath++] = ea;
+	w->desc = ea;
+	w->levels++;
+	if (!(d & 2)) {
+		sr |= MMUSR_I;
+		goto done;
+	}
+	if (update && !(d & D_U))
+		pwr(ea, d |= D_U);
+	if (d & D_WP)
+		w->wp = 1;
+	/* page */
+	ea = big ? (d & ~0x7fu) + ((va >> 13) & 0x1f) * 4 :
+	    (d & ~0xffu) + ((va >> 12) & 0x3f) * 4;
+	d = prd(ea);
+	w->path[w->npath++] = ea;
+	w->desc = ea;
+	w->levels++;
+	if ((d & 3) == 2) {			/* indirect */
+		ea = d & ~3u;
+		d = prd(ea);
+		w->path[w->npath++] = ea;
+		w->desc = ea;
+		w->levels++;
+	}
+	if (!(d & 1)) {
+		sr |= MMUSR_I;
+		goto done;
+	}
+	w->pdesc = ea;
+	if (d & D_WP)
+		w->wp = 1;
+	if (d & 0x80)
+		s = 1;
+	w->ci = ((d >> 5) & 3) >= 2;
+	w->pa = big ? (d & ~0x1fffu) | (va & 0x1fff) : (d & ~0xfffu) | (va & 0xfff);
+	if (s && !(fc & 4))
+		sr |= MMUSR_S;
+	if (w->wp)
+		sr |= MMUSR_W;
+	if (!(sr & MMUSR_S) && !(write && w->wp) && update) {
+		u32 nv = d | D_U | (write ? D_M : 0);
+
+		if (nv != d)
+			pwr(ea, d = nv);
+	}
+	w->mod = (d & D_M) != 0;
+	if (d & D_M)
+		sr |= MMUSR_M;
+phys:
+	if (w->pa >= bootcap.hole_base && w->pa < bootcap.hole_top)
+		sr |= MMUSR_B;
+	if (!w->pdesc)
+		w->mod = 1;
+done:
+	return sr | (u16)(w->levels & MMUSR_N);
+}
 
 /* 68030 TT0/TT1 match for a data access */
 static int
@@ -352,6 +555,8 @@ walk(u32 va, u32 fc, int write, int update, u32 maxlev, struct walk *w)
 	w->npath = 0;
 	w->levels = 0;
 	w->pa = va;
+	if (cpuinfo.model >= 40)
+		return walk040(va, fc, write, update, w);
 	if (tt_match(guest.tt0, va, fc, write) ||
 	    tt_match(guest.tt1, va, fc, write)) {
 		sr = MMUSR_T;
@@ -523,7 +728,7 @@ l3_alloc(int vi, u32 *l2e)
 		l3 = l3free;
 		l3free = (u32 *)(uintptr_t)l3[0];
 		memset(l3, 0, L3SIZE);
-	} else if (!(l3 = pool_alloc(L3SIZE)))
+	} else if (!(l3 = pool_alloc_al(L3SIZE, sh_al3)))
 		return NULL;
 	m = (struct l3meta *)(l3 + SH_L3);
 	m->l3 = l3;
@@ -552,11 +757,11 @@ l3_release(u32 i)			/* list index i: unlink and recycle */
 static int
 shadow_set(struct view *v, u32 va, u32 pd, const struct walk *w)
 {
-	u32 *l2, *l3, i1 = va >> 24, i2 = (va >> 16) & 0xff, k, j, nup;
+	u32 *l2, *l3, i1 = I1(va), i2 = I2(va), k, j, nup;
 	struct l3meta *m;
 
 	if (!(v->l1[i1] & D_DT)) {
-		if (!(l2 = pool_alloc(SH_L2 * 4)))
+		if (!(l2 = pool_alloc_tab()))
 			return -1;
 		v->l1[i1] = (u32)(uintptr_t)l2 | DT_SHORT;
 	}
@@ -567,7 +772,7 @@ shadow_set(struct view *v, u32 va, u32 pd, const struct walk *w)
 		l2[i2] = (u32)(uintptr_t)l3 | DT_SHORT;
 	}
 	l3 = (u32 *)(uintptr_t)(l2[i2] & ~0xf);
-	k = (va >> 11) & 31;
+	k = I3(va);
 	l3[k] = pd;
 	if (!w)
 		return 0;			/* same entry, new protection */
@@ -597,14 +802,14 @@ shadow_set(struct view *v, u32 va, u32 pd, const struct walk *w)
 static u32
 shadow_get(const struct view *v, u32 va)
 {
-	u32 d = v->l1[va >> 24];
+	u32 d = v->l1[I1(va)];
 
 	if (!(d & D_DT))
 		return 0;
-	d = ((u32 *)(uintptr_t)(d & ~0xf))[(va >> 16) & 0xff];
+	d = ((u32 *)(uintptr_t)(d & ~0xf))[I2(va)];
 	if (!(d & D_DT))
 		return 0;
-	return ((u32 *)(uintptr_t)(d & ~0xf))[(va >> 11) & 31];
+	return ((u32 *)(uintptr_t)(d & ~0xf))[I3(va)];
 }
 
 /*
@@ -657,8 +862,70 @@ shadow_fill(u32 va, int write)
 		n_fill++;
 	tlb_clear(v);
 	if (loaded >= 0)
-		mmu030_root(views[loaded].crp);	/* also flushes the ATC */
+		mmu_root(loaded);	/* also flushes the ATC */
 	return 1;
+}
+
+/*
+ * 68040 access error frame (format 7): SSW at +0x0C (ATC bit 10: an
+ * address translation fault; RW bit 8: read; LK bit 9), fault address at
+ * +0x14, write-backs WB3/WB2/WB1 (status words at +0x0E/+0x10/+0x12: V bit
+ * 7, size bits 6-5; address and data at +0x18/+0x1C, +0x20/+0x24,
+ * +0x28/+0x2C). The CPU restarts the instruction but does not do pending
+ * write-backs, the handler does: for a shadow miss SORIX-LDOM fills the
+ * shadow, completes the write-backs through the guest's tables and
+ * returns. Anything that does not work out is the guest's to handle.
+ */
+static int
+writeback040(u8 *f, u32 so, u32 ao, u32 dO)
+{
+	u16 wbs = *(u16 *)(f + so);
+	u32 a = *(u32 *)(f + ao), d = *(u32 *)(f + dO), pa;
+	int super = (guest.vsr & VSR_S) != 0, sz = (wbs >> 5) & 3;
+
+	if (!(wbs & 0x80))
+		return 0;
+	if (sz == 3 || shadow_fill(a, 1) < 0 ||
+	    vmmu_translate(a, super, 1, &pa))
+		return -1;			/* MOVE16 line, or the guest's */
+	if (sz == 1)
+		*(volatile u8 *)(uintptr_t)pa = (u8)d;
+	else if (sz == 2)
+		*(volatile u16 *)(uintptr_t)pa = (u16)d;
+	else
+		*(volatile u32 *)(uintptr_t)pa = d;
+	*(u16 *)(f + so) = wbs & ~0x80;
+	return 0;
+}
+
+static int
+fault040(struct excregs *r)
+{
+	u8 *f = (u8 *)&r->sr;
+	u16 ssw = *(u16 *)(f + 0x0c);
+	u32 fa = *(u32 *)(f + 0x14);
+	int write = !(ssw & 0x0100) || (ssw & 0x0200), k;
+
+	cur_pc = r->pc;
+	cur_ssw = ssw;
+	if (!(ssw & 0x0400))
+		return -1;			/* a bus error, not the MMU */
+	if ((k = shadow_fill(fa, write)) <= 0) {
+		if (k == 0 && nflog < NLOG) {	/* a real access error */
+			flog[nflog].va = fa;
+			flog[nflog].pc = r->pc;
+			flog[nflog].ssw = ssw;
+			flog[nflog].mmusr = 0;
+			flog[nflog].super = (guest.vsr & VSR_S) != 0;
+			flog[nflog++].write = (u8)write;
+		}
+		return -1;
+	}
+	if (writeback040(f, 0x0e, 0x18, 0x1c) ||	/* WB3 */
+	    writeback040(f, 0x10, 0x20, 0x24) ||	/* WB2 */
+	    writeback040(f, 0x12, 0x28, 0x2c))		/* WB1 */
+		return -1;
+	return 0;
 }
 
 /*
@@ -674,7 +941,33 @@ vmmu_fault(struct excregs *r)
 	u32 fmt = r->fmtvec >> 12, sb, done = 0;
 	int k;
 
-	if (!enabled || (fmt != 0xa && fmt != 0xb))
+	if (!enabled)
+		return -1;
+	if (fmt == 4) {
+		/*
+		 * 68060 access error: fault address at +8, FSLW at +0x0C
+		 * (bit 23: write, also read-modify-write). The CPU restarts
+		 * the instruction after the RTE.
+		 */
+		u32 fa = *(const u32 *)(f + 8), fslw = *(const u32 *)(f + 0x0c);
+
+		cur_pc = r->pc;
+		cur_ssw = (u16)fslw;
+		if ((k = shadow_fill(fa, (fslw & 0x00800000) != 0)) > 0)
+			return 0;
+		if (k == 0 && nflog < NLOG) {	/* a real access error */
+			flog[nflog].va = fa;
+			flog[nflog].pc = r->pc;
+			flog[nflog].ssw = (u16)fslw;
+			flog[nflog].mmusr = 0;
+			flog[nflog].super = (guest.vsr & VSR_S) != 0;
+			flog[nflog++].write = (fslw & 0x00800000) != 0;
+		}
+		return -1;
+	}
+	if (fmt == 7)
+		return fault040(r);
+	if (fmt != 0xa && fmt != 0xb)
 		return -1;
 	sb = fmt == 0xb ? *(const u32 *)(f + 0x24) : r->pc + 4;
 	cur_pc = r->pc;
@@ -742,7 +1035,7 @@ vmmu_watch_step(void)
 		shadow_set(v, watch_open, pd | D_WP, NULL);
 	watch_open = 0;
 	if (loaded >= 0)
-		mmu030_root(views[loaded].crp);
+		mmu_root(loaded);
 	return 1;
 }
 
@@ -774,7 +1067,7 @@ vmmu_watch(u32 va)
 	watch_open = 0;
 	shadow_clear();
 	if (loaded >= 0)
-		mmu030_root(views[loaded].crp);
+		mmu_root(loaded);
 }
 
 /* shell "pt": the guest's table walk for va, descriptor by descriptor */
@@ -804,11 +1097,17 @@ void
 vmmu_show(void)
 {
 	if (!enabled && !watch_va) {
-		kprintf("  shadow MMU: off (68030 only so far)\n");
+		kprintf("  shadow MMU: off (no working MMU)\n");
 		return;
 	}
-	kprintf("  shadow MMU: guest TC %08x CRP %08x%08x SRP %08x%08x\n",
-	    guest.tc, guest.crp[0], guest.crp[1], guest.srp[0], guest.srp[1]);
+	if (cpuinfo.model >= 40)
+		kprintf("  shadow MMU: guest TC %08x URP %08x SRP %08x ITT0 %08x "
+		    "DTT0 %08x\n", guest.tcr, guest.urp, guest.srp40, guest.itt0,
+		    guest.dtt0);
+	else
+		kprintf("  shadow MMU: guest TC %08x CRP %08x%08x SRP %08x%08x\n",
+		    guest.tc, guest.crp[0], guest.crp[1], guest.srp[0],
+		    guest.srp[1]);
 	kprintf("  shadow MMU: %u fills, %u M-bit upgrades, %u guest faults, "
 	    "%u flushes (+%u user view only), pool %u/%u bytes\n", n_fill,
 	    n_wp, n_guestfault, n_flush, n_flush_user, pool_used, POOL_SIZE);

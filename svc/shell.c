@@ -1121,9 +1121,6 @@ boot_target(const char *what, int pv, int force)
 		kprintf("boot: not started (boot -f, or confirm in the menu)\n");
 		return BOOT_ENOTFIT;
 	}
-	if (pv && cpuinfo.model != 30)
-		kprintf("boot: warning: no shadow MMU on the 680%u yet; the "
-		    "guest runs untranslated\n", cpuinfo.model);
 	if (pv) {
 		for (n = 0; what[n] && n < sizeof(last_target) - 1; n++)
 			last_target[n] = what[n];
