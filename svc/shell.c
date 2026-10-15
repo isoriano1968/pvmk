@@ -722,6 +722,7 @@ amix_start_pv(struct amix_bootinfo *bi, u32 sp)
 	display_off();
 	screen_taken = 0;
 	vcpu_prepare("amix", amixk.bd.entry, sp, AMIX_EXEC1);
+	vcpu_spl_patching(amixk.bd.tvaddr, amixk.bd.tsize);
 	guest.ctx.d[1] = (u32)(uintptr_t)bi;
 	kprintf("boot: starting AMIX deprivileged at %08x (D0=3, D1=%p); "
 	    "Ctrl-C on serial breaks in\n", amixk.bd.entry, bi);
@@ -936,6 +937,10 @@ cmd_guest(int argc, char **argv)
 {
 	if (argc > 1 && streq(argv[1], "log")) {
 		amix_log();
+		return;
+	}
+	if (argc > 1 && streq(argv[1], "stats")) {
+		vcpu_stats();
 		return;
 	}
 	vcpu_show();
@@ -1285,7 +1290,7 @@ static const struct cmd cmds[] = {
 	{ "menu",  "",                  "the boot menu", cmd_menu },
 	{ "pvtest", "[loop] [stop]",    "run the virtual CPU test guest", cmd_pvtest },
 	{ "gdb",   "",                  "serve GDB on the serial port (guest)", cmd_gdb },
-	{ "guest", "[log]",             "state of the stopped guest (log: AMIX messages)", cmd_guest },
+	{ "guest", "[log|stats]",       "stopped guest: state, AMIX messages, profile", cmd_guest },
 	{ "resume", "",                 "continue the stopped guest", cmd_resume },
 	{ "watch", "[addr]",            "log guest writes to addr (shadow MMU)", cmd_watch },
 	{ "pt",    "<addr> [u]",        "guest page table walk (u: user view)", cmd_pt },

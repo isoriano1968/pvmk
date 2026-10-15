@@ -763,6 +763,28 @@ T1, continue, detach, kill, noack, guest console as `O` packets); `make test`
 drives gdb-multiarch against pvtest on 030/040/060. Not yet: stub for pvmk
 itself, `$`-packet auto switch, `monitor` commands, watchpoints.
 M3 complete in FS-UAE; real-A3000 confirmation pending.
+M6 in progress (68030, FS-UAE). Measured on the time from `boot -pv` to
+AMIX's login screen (fresh copy of a clean disk): 148 s before M6.
+`guest stats` profiles the emulated instructions and the shadow. Done:
+- spl sites patched lazily to line A (A10n/A11n/A120/A13n: only code the
+  CPU has executed, in identity-mapped kernel text) with a fast path in
+  core/vectors.S: the SR moves (64% of all emulation) no longer go
+  through the C exception path;
+- a PMOVE to CRP (AMIX's hat_asload: pmove crp; pflusha) rebuilds only
+  the user view; the kernel view is kept;
+- the CPU root is reloaded whenever the shadow pool is cleared (bug).
+Result: login after 112 s. The remaining cost is shadow refills (about
+1.5 million per boot) after AMIX's ~30,000 full PFLUSHAs (flushmmu after
+page table changes, resume after the u-area switch). Tried and dropped:
+prefilling 64 KB around a miss (slower: most refills touch one page) and
+write-tracking the guest's page tables with precise invalidation (AMIX
+rewrites descriptors ~1,500 times per second during boot; trapping
+those costs more than the refills; per-descriptor ranges and unsyncing
+bulk-written pages did not change that). flushmmu's arguments are not
+reliable (several callers pass one argument or none). Next candidates:
+a cheaper fill path (assembly, like the line A fast path), MOVES/MOVEC/
+MOVE USP in AMIX's trap entry and exit (still 75% of the remaining
+emulation), and measurements on the real A3000.
 M5 (FS-UAE): boot menu in svc/menu.c, entries from `entry=` or automatic,
 kernel chooser for /stand, deprivileged/native toggle, shell, reboot;
 `nextboot` (once, kept in the log area header beside the boot request),

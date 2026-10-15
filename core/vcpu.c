@@ -33,6 +33,7 @@ static u32 rxhead, rxlen;
 
 #define VEC_BUSERR	2
 #define VEC_ILLEGAL	4
+#define VEC_LINEA	10
 #define VEC_PRIV	8
 #define VEC_FORMAT	14
 #define VEC_TRAP15	47
@@ -54,6 +55,22 @@ stop_guest(struct excregs *r, const char *why, u32 sig, int swbreak)
  * view a MOVES function code selects).
  */
 static struct excregs *cur_regs;	/* the guest's registers, for faults */
+
+/* profile of emulated instructions and shadow flushes ("guest stats") */
+enum {
+	P_SR_TO_DN, P_SR_TO_MEM, P_DN_TO_SR, P_IMM_TO_SR, P_MEM_TO_SR,
+	P_SR_LOGIC, P_RTE, P_MOVEC, P_USP, P_STOP, P_MOVES, P_PMOVE_REG,
+	P_PMOVE_MMU, P_PFLUSH, P_PTEST, P_FPU, P_CACHE, P_OTHER, P_SPL_PAIR,
+	P_N
+};
+static const char *const pnames[P_N] = {
+	"move sr,dn", "move sr,<mem>", "move dn,sr", "move #,sr",
+	"move <mem>,sr", "andi/ori/eori sr", "rte", "movec", "move usp",
+	"stop", "moves", "pmove (no flush)", "pmove tc/crp/srp/tt", "pflush",
+	"ptest", "fsave/frestore", "cinv/cpush", "other",
+	"  of which spl pairs",
+};
+static u32 prof[P_N];
 
 /*
  * A guest access that fails while an instruction is emulated: the rest of
@@ -595,6 +612,9 @@ movec(struct excregs *r, u16 op, u32 *pc)
 	return 0;
 }
 
+static u32 guest_events(void);
+static u32 crp_next = 1, crp_events;	/* the instruction after PMOVE CRP */
+
 /* 68030 PMMU: PMOVE, PFLUSH, PLOAD, PTEST (line F, coprocessor id 0). */
 static int
 pmmu030(struct excregs *r, u16 op, u32 *pc)
@@ -631,7 +651,12 @@ pmmu030(struct excregs *r, u16 op, u32 *pc)
 			p[0] = rd32(e.addr);
 			if (size == 8)
 				p[1] = rd32(e.addr + 4);
-			vmmu_flush();		/* new tables or geometry */
+			if (p == guest.crp) {	/* new user address space */
+				vmmu_flush_user();
+				crp_next = *pc;
+				crp_events = guest_events();
+			} else
+				vmmu_flush();	/* new tables or geometry */
 		}
 		return 0;
 	case 0x6000:				/* PMOVE MMUSR */
@@ -647,8 +672,15 @@ pmmu030(struct excregs *r, u16 op, u32 *pc)
 		    (ext & 0x1c00) == 0x0000) &&	/* PLOAD fc,<ea> */
 		    ea_decode(r, mode, regno, 4, pc, &e))
 			return FAULT;
-		if (ext & 0x1c00)
-			vmmu_flush();		/* PFLUSH: all of it */
+		/*
+		 * PFLUSH: all of it, except right after a PMOVE to CRP (AMIX's
+		 * hat_asload: pmove crp; pflusha), which already rebuilt the
+		 * only view that changed.
+		 */
+		if ((ext & 0x1c00) && !(r->pc == crp_next &&
+		    guest_events() == crp_events + 1))
+			vmmu_flush();
+		crp_next = 1;
 		return 0;
 	case 0x8000: {				/* PTEST */
 		u32 fc, desc;
@@ -810,6 +842,95 @@ rte(struct excregs *r)
 	return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* spl sites patched to line A                                         */
+
+/*
+ * The guest kernel's SR moves (its spl sequences) trap on every
+ * execution. Once one has trapped in the guest's kernel text, it is
+ * rewritten in place as a line A opcode that the line A handler executes
+ * with less work, a pair as one:
+ *
+ *	A10n	move sr,dn
+ *	A11n	move dn,sr
+ *	A120	move #imm,sr		(imm follows)
+ *	A13n	move sr,dn; move #imm,sr
+ *
+ * Only code the CPU has just executed is patched (no guessing what is an
+ * instruction), only in the kernel's text, and only where it is identity
+ * mapped (written through the physical address).
+ */
+u32 spl_lo, spl_hi;			/* kernel text, 0 = no patching */
+static u32 n_spl_patched, n_aline;
+u32 aline_fast;				/* core/vectors.S: guest running */
+u32 aline_count;			/* ... sites executed there */
+u16 *const vcpu_vsr = &guest.vsr;
+
+void
+vcpu_spl_patching(u32 text, u32 size)
+{
+	spl_lo = text;
+	spl_hi = text + size;
+	n_spl_patched = 0;
+}
+
+static void
+spl_patch(u32 pc, u16 op, u16 next)
+{
+	u32 pa;
+	u16 a;
+
+	if (!spl_lo || pc < spl_lo || pc + 6 > spl_hi ||
+	    vmmu_translate(pc, 1, 0, &pa) || pa != pc)
+		return;
+	if ((op & 0xfff8) == 0x40c0)
+		a = (u16)(next == 0x46fc ? 0xa130 : 0xa100) | (op & 7);
+	else if ((op & 0xfff8) == 0x46c0)
+		a = 0xa110 | (op & 7);
+	else if (op == 0x46fc)
+		a = 0xa120;
+	else
+		return;
+	*(volatile u16 *)(uintptr_t)pc = a;
+	icache_inval(cpuinfo.model);
+	n_spl_patched++;
+}
+
+/* A line A trap: one of ours (1, done) or the guest's (0) */
+static int
+aline(struct excregs *r)
+{
+	u16 op = rd16(r->pc);
+	u32 *dn = &r->d[op & 7];
+
+	if (!spl_lo || r->pc < spl_lo || r->pc >= spl_hi ||
+	    (op & 0xffc0) != 0xa100 || !(guest.vsr & VSR_S))
+		return 0;
+	n_aline++;
+	switch (op & 0xfff0) {
+	case 0xa100:				/* move sr,dn */
+		*dn = (*dn & 0xffff0000) | cur_vsr(r);
+		r->pc += 2;
+		return 1;
+	case 0xa110:				/* move dn,sr */
+		set_vsr(r, (u16)*dn);
+		r->pc += 2;
+		return 1;
+	case 0xa120:				/* move #imm,sr */
+		if (op & 0xf)
+			return 0;
+		set_vsr(r, rd16(r->pc + 2));
+		r->pc += 4;
+		return 1;
+	case 0xa130:				/* move sr,dn; move #imm,sr */
+		*dn = (*dn & 0xffff0000) | cur_vsr(r);
+		set_vsr(r, rd16(r->pc + 4));
+		r->pc += 6;
+		return 1;
+	}
+	return 0;
+}
+
 /*
  * Emulate the privileged instruction at r->pc (virtual supervisor mode).
  * Returns 0 when done (r->pc advanced), FAULT for "reflect as illegal".
@@ -823,6 +944,23 @@ emulate(struct excregs *r)
 
 	mode = (op >> 3) & 7;
 	regno = op & 7;
+	prof[(op & 0xfff8) == 0x40c0 ? P_SR_TO_DN :
+	    (op & 0xffc0) == 0x40c0 ? P_SR_TO_MEM :
+	    (op & 0xfff8) == 0x46c0 ? P_DN_TO_SR : op == 0x46fc ? P_IMM_TO_SR :
+	    (op & 0xffc0) == 0x46c0 ? P_MEM_TO_SR :
+	    op == 0x027c || op == 0x007c || op == 0x0a7c ? P_SR_LOGIC :
+	    op == 0x4e73 ? P_RTE : (op & 0xfffe) == 0x4e7a ? P_MOVEC :
+	    (op & 0xfff0) == 0x4e60 ? P_USP : op == 0x4e72 ? P_STOP :
+	    (op & 0xff00) == 0x0e00 ? P_MOVES :
+	    (op & 0xffc0) == 0xf000 ? ((rd16(pc) & 0xe000) == 0x2000 ? P_PFLUSH :
+	    (rd16(pc) & 0xe000) == 0x8000 ? P_PTEST : (rd16(pc) & 0x0200) ||
+	    (rd16(pc) & 0xe000) == 0x6000 ? P_PMOVE_REG : P_PMOVE_MMU) :
+	    (op & 0xff80) == 0xf300 ? P_FPU : (op & 0xff00) == 0xf400 ? P_CACHE :
+	    (op & 0xffe0) == 0xf500 ? P_PFLUSH : P_OTHER]++;
+	if ((op & 0xfff8) == 0x40c0 && rd16(pc) == 0x46fc)
+		prof[P_SPL_PAIR]++;
+	if ((op & 0xfff8) == 0x40c0 || (op & 0xfff8) == 0x46c0 || op == 0x46fc)
+		spl_patch(r->pc, op, rd16(pc));
 	if ((op & 0xffc0) == 0x40c0) {			/* MOVE SR,<ea> */
 		if (ea_decode(r, mode, regno, 2, &pc, &e) || e.is_imm)
 			return FAULT;
@@ -911,6 +1049,7 @@ stop_guest(struct excregs *r, const char *why, u32 sig, int swbreak)
 {
 	save_ctx(r);
 	guest.running = 0;
+	aline_fast = 0;
 	guest.stop_sig = sig;
 	guest.stop_swbreak = swbreak;
 	gdb_step = 0;
@@ -1103,6 +1242,8 @@ vcpu_exception(struct excregs *r)
 			reflect(r, VEC_ILLEGAL, 0, -1);
 	} else if (vec == VEC_TRAP15 && (guest.vsr & VSR_S)) {
 		hypercall(r);				/* PC is past the TRAP */
+	} else if (vec == VEC_LINEA && aline(r)) {
+		/* a patched spl site */
 	} else if (vec == VEC_BUSERR && (k = vmmu_fault(r)) >= 0) {
 		r->sr = real_sr(r);			/* shadow miss: rerun */
 		if (k)
@@ -1143,6 +1284,9 @@ void
 vcpu_prepare(const char *name, u32 pc, u32 ssp, u32 d0)
 {
 	memset(&guest, 0, sizeof(guest));
+	memset(prof, 0, sizeof(prof));
+	spl_lo = spl_hi = 0;			/* the AMIX loader turns it on */
+	n_aline = aline_count = aline_fast = 0;
 	rxhead = rxlen = nrlog = 0;
 	vmmu_reset();
 	guest.ctx.d[0] = d0;
@@ -1194,8 +1338,28 @@ vcpu_resume(void)
 	con_interactive(0);
 	REG16(CUSTOM_INTENA) = 0xc800;		/* master + serial receive */
 	cur_regs = NULL;
+	aline_fast = spl_lo != 0;
 	vmmu_activate();
 	vcpu_enter(&guest.ctx, sstack_top());
+}
+
+void
+vcpu_stats(void)
+{
+	u32 i, t = 0;
+
+	for (i = 0; i < P_SPL_PAIR; i++)
+		t += prof[i];
+	kprintf("emulated instructions: %u\n", t);
+	for (i = 0; i < P_N; i++)
+		if (prof[i])
+			kprintf("  %-22s %9u  %3u%%\n", pnames[i], prof[i],
+			    t >= 100 ? prof[i] / (t / 100) : 0);
+	kprintf("reflected %u, interrupts %u, hypercalls %u, idle wake-ups %u\n",
+	    guest.n_reflect, guest.n_irq, guest.n_hcall, guest.n_idle);
+	kprintf("spl sites patched %u, executed through line A %u (fast "
+	    "path %u)\n", n_spl_patched, n_aline, aline_count);
+	vmmu_show();
 }
 
 void

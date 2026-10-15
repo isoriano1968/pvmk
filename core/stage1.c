@@ -31,6 +31,7 @@ stage1_main(void *arg)
 
 	for (i = 2; i < 256; i++)
 		vectors[i] = (u32)(uintptr_t)exc_entry;
+	vectors[10] = (u32)(uintptr_t)aline_entry;
 	set_vbr(vectors);
 	REG16(COLOR00) = 0x003;		/* dark blue: microkernel running */
 

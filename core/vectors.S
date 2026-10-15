@@ -101,3 +101,90 @@ cold_reboot:
 	.p2alignw 2,0x4e71		/* NOP padding: RESET+JMP in one longword */
 	reset
 	jmp	(%a0)
+
+/*
+ * Line A (vector 10): fast path for the guest kernel's patched spl sites
+ * (A10n, A11n, A120, A13n; see aline() in vcpu.c, which also handles
+ * everything this leaves to exc_entry). Kernel text is identity mapped,
+ * so the opcode is read through SORIX-LDOM's own (physical) view. An
+ * interrupt arriving here is left pending by exception() (it raises the
+ * interrupted SR to IPL 7) and taken when the guest runs again.
+ */
+	.globl	aline_entry
+aline_entry:
+	tst.l	aline_fast
+	beq	exc_entry
+	btst	#5,(%sp)		/* from SORIX-LDOM itself */
+	bne	exc_entry
+	tst.b	(%sp)			/* T1: tracing (GDB, watchpoint) */
+	bmi	exc_entry
+	movem.l	%d0-%d7/%a0-%a1,-(%sp)	/* 40 bytes: frame at 40(%sp) */
+	move.l	42(%sp),%a0		/* PC */
+	cmp.l	spl_lo,%a0
+	blo	9f
+	cmp.l	spl_hi,%a0
+	bhs	9f
+	move.w	(%a0),%d0		/* opcode */
+	move.w	%d0,%d1
+	and.w	#0xffc0,%d1
+	cmp.w	#0xa100,%d1
+	bne	9f
+	move.l	vcpu_vsr,%a1
+	move.w	(%a1),%d2		/* virtual system byte */
+	btst	#13,%d2			/* virtual S */
+	beq	9f
+	move.w	40(%sp),%d4		/* full virtual SR: system byte + CCR */
+	and.w	#0x001f,%d4
+	move.w	%d2,%d3
+	and.w	#0xff00,%d3
+	or.w	%d3,%d4
+	moveq	#7,%d1
+	and.w	%d0,%d1
+	lsl.w	#2,%d1			/* Dn slot */
+	move.w	%d0,%d3
+	and.w	#0x0030,%d3
+	beq.s	1f			/* A10n: move sr,dn */
+	cmp.w	#0x0010,%d3
+	beq.s	2f			/* A11n: move dn,sr */
+	cmp.w	#0x0020,%d3
+	beq.s	3f			/* A120: move #imm,sr */
+	move.w	4(%a0),%d5		/* A13n: move sr,dn; move #imm,sr */
+	moveq	#6,%d6
+	bra.s	5f
+1:	move.w	%d4,2(%sp,%d1.w)
+	addq.l	#2,42(%sp)
+	bra.s	8f
+2:	move.w	2(%sp,%d1.w),%d5
+	moveq	#2,%d6
+	bra.s	4f
+3:	move.w	%d0,%d3
+	and.w	#0x000f,%d3
+	bne.s	9f
+	move.w	2(%a0),%d5
+	moveq	#4,%d6
+	bra.s	4f
+5:	bsr.s	6f			/* check before Dn changes */
+	bne.s	9f
+	move.w	%d4,2(%sp,%d1.w)
+	bra.s	7f
+4:	bsr.s	6f
+	bne.s	9f
+7:	move.w	%d5,%d3			/* new SR: virtual system byte, */
+	and.w	#0xff00,%d3
+	move.w	%d3,(%a1)
+	and.w	#0x071f,%d5		/* real SR: user mode, IPL, CCR */
+	move.w	%d5,40(%sp)
+	add.l	%d6,42(%sp)
+8:	addq.l	#1,aline_count
+	movem.l	(%sp)+,%d0-%d7/%a0-%a1
+	rte
+/* Z set if the new SR (d5) keeps S and M and has no trace bits */
+6:	move.w	%d5,%d3
+	eor.w	%d2,%d3
+	and.w	#0x3000,%d3
+	bne.s	61f
+	move.w	%d5,%d3
+	and.w	#0xc000,%d3
+61:	rts
+9:	movem.l	(%sp)+,%d0-%d7/%a0-%a1
+	bra	exc_entry

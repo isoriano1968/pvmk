@@ -78,6 +78,8 @@ void vcpu_prepare(const char *name, u32 pc, u32 ssp, u32 d0);	/* stopped */
 void vcpu_resume(void) __attribute__((noreturn));
 void vcpu_set_ps(u16 sr);		/* change the stopped guest's SR */
 void vcpu_show(void);
+void vcpu_stats(void);			/* profile ("guest stats") */
+void vcpu_spl_patching(u32 text, u32 size);	/* kernel text, 0: off */
 
 /* From exception(): an exception taken while the guest ran (user mode). */
 void vcpu_exception(struct excregs *r);

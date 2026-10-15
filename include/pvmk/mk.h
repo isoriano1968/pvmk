@@ -9,6 +9,7 @@
 
 /* core/vectors.S */
 void exc_entry(void);
+void aline_entry(void);			/* line A: patched spl fast path */
 void restart(u32 sp, void (*fn)(void)) __attribute__((noreturn));
 void set_vbr(void *vbr);
 u32  get_vbr(void);

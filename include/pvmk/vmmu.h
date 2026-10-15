@@ -43,6 +43,7 @@
 void vmmu_reset(void);			/* new guest */
 u32  vmmu_scratch(u32 size);		/* boot: 4 KB aligned, before use */
 void vmmu_flush(void);			/* guest flush, root or TC change */
+void vmmu_flush_user(void);		/* new CRP: the user view only */
 void vmmu_activate(void);		/* before entering the guest */
 void vmmu_off(void);			/* SORIX-LDOM gives the machine away */
 

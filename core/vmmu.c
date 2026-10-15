@@ -63,6 +63,7 @@ tlb_clear(struct view *v)
 
 static struct view views[2];		/* 0 user, 1 kernel */
 static int loaded = -1;			/* view in the real CRP, -1 MMU off */
+static u32 n_flush_user;
 static int enabled;			/* shadow active (68030) */
 static u32 n_fill, n_wp, n_guestfault, n_flush, n_reset;
 
@@ -131,6 +132,8 @@ shadow_clear(void)
 		views[i].crp[1] = (u32)(uintptr_t)views[i].l1;
 		tlb_clear(&views[i]);
 	}
+	if (loaded >= 0)
+		mmu030_root(views[loaded].crp);	/* the old tables are gone */
 }
 
 /* 4 KB aligned scratch memory for the boot-time MMU self-test */
@@ -146,7 +149,7 @@ void
 vmmu_reset(void)
 {
 	enabled = cpuinfo.model == 30 && cpuinfo.mmu_ok;
-	n_fill = n_wp = n_guestfault = n_flush = nflog = 0;
+	n_fill = n_wp = n_guestfault = n_flush = nflog = n_flush_user = 0;
 	n_reset++;
 	shadow_clear();
 	if (loaded >= 0)
@@ -158,6 +161,32 @@ vmmu_flush(void)
 {
 	n_flush++;
 	shadow_clear();
+	if (loaded >= 0)
+		mmu030_root(views[loaded].crp);
+}
+
+/*
+ * A new CRP only changes the user view when the guest's supervisor
+ * accesses use the SRP (TC SRE), as with AMIX's hat_asload (pmove crp;
+ * pflusha); the kernel view is kept. The old user view's tables stay
+ * allocated until the pool is next cleared.
+ */
+void
+vmmu_flush_user(void)
+{
+	struct view *v = &views[0];
+
+	if (!(guest.tc & TC_SRE)) {		/* no SRE: CRP is both */
+		vmmu_flush();
+		return;
+	}
+	n_flush_user++;
+	if (!(v->l1 = pool_alloc(SH_L1 * 4))) {
+		vmmu_flush();			/* pool full: start over */
+		return;
+	}
+	v->crp[1] = (u32)(uintptr_t)v->l1;
+	tlb_clear(v);
 	if (loaded >= 0)
 		mmu030_root(views[loaded].crp);
 }
@@ -525,6 +554,14 @@ vmmu_fault(struct excregs *r)
 			return -1;
 		done += (u32)k;
 	}
+	if (!done && nflog < NLOG) {		/* a real bus error: log it */
+		flog[nflog].va = *(const u32 *)(f + 0x10);
+		flog[nflog].pc = r->pc;
+		flog[nflog].ssw = ssw;
+		flog[nflog].mmusr = 0;
+		flog[nflog].super = (guest.vsr & VSR_S) != 0;
+		flog[nflog++].write = !(ssw & 0x0040);
+	}
 	return done ? 0 : -1;			/* nothing missing: real error */
 }
 
@@ -612,8 +649,8 @@ vmmu_show(void)
 	kprintf("  shadow MMU: guest TC %08x CRP %08x%08x SRP %08x%08x\n",
 	    guest.tc, guest.crp[0], guest.crp[1], guest.srp[0], guest.srp[1]);
 	kprintf("  shadow MMU: %u fills, %u M-bit upgrades, %u guest faults, "
-	    "%u flushes, pool %u/%u bytes\n", n_fill, n_wp, n_guestfault,
-	    n_flush, pool_used, POOL_SIZE);
+	    "%u flushes (+%u user view only), pool %u/%u bytes\n", n_fill,
+	    n_wp, n_guestfault, n_flush, n_flush_user, pool_used, POOL_SIZE);
 	if (watch_va)
 		kprintf("  watch %08x: %u writes to its page\n", watch_va, nwatch);
 	for (u32 i = 0; i < nwlog; i++)
