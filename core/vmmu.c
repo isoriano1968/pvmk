@@ -1,0 +1,627 @@
+/*
+ * Shadow MMU for the guest (68030): see include/pvmk/vmmu.h.
+ */
+#include "pvmk/bootcap.h"
+#include "pvmk/kprintf.h"
+#include "pvmk/vcpu.h"
+#include "pvmk/vmmu.h"
+
+/* 68030 TC */
+#define TC_E		0x80000000
+#define TC_SRE		0x02000000
+#define TC_FCL		0x01000000
+
+/* descriptor bits */
+#define D_DT		0x00000003	/* 0 invalid, 1 page, 2 short, 3 long */
+#define D_WP		0x00000004
+#define D_U		0x00000008
+#define D_M		0x00000010
+#define D_CI		0x00000040
+#define D_S		0x00000100	/* long descriptors */
+#define DT_PAGE		1
+#define DT_SHORT	2
+#define DT_LONG		3
+
+/*
+ * Shadow geometry: TIA 8, TIB 8, TIC 5, 2 KB pages. Short descriptors.
+ * TC = E | PS 2K | IS 0 | 8/8/5.
+ */
+#define SH_TC		0x80b08850
+#define SH_PAGE		2048
+#define SH_L1		256
+#define SH_L2		256
+#define SH_L3		32
+/* TT0 for SORIX-LDOM: all addresses, supervisor FCs (4-7), read and write */
+#define SH_TT0		0x00ff8143
+
+#define POOL_SIZE	(48 * 1024)
+
+static u8 pool[POOL_SIZE] __attribute__((aligned(16)));
+static u32 pool_used;
+
+/* software TLB for SORIX-LDOM's own accesses to guest memory */
+#define NTLB		16
+struct tlb {
+	u32 va, pa;			/* 256-byte pages; va = 1: empty */
+	int w;				/* writable */
+};
+
+struct view {
+	u32 *l1;			/* shadow root table */
+	u32 crp[2];			/* real CRP for it */
+	struct tlb tlb[NTLB];
+};
+
+static void
+tlb_clear(struct view *v)
+{
+	int i;
+
+	for (i = 0; i < NTLB; i++)
+		v->tlb[i].va = 1;
+}
+
+static struct view views[2];		/* 0 user, 1 kernel */
+static int loaded = -1;			/* view in the real CRP, -1 MMU off */
+static int enabled;			/* shadow active (68030) */
+static u32 n_fill, n_wp, n_guestfault, n_flush, n_reset;
+
+/* the first faults passed to the guest, for the shell's "guest" */
+#define NLOG		6
+static struct { u32 va, pc; u16 ssw, mmusr; u8 super, write; } flog[NLOG];
+static u32 nflog;
+static u32 cur_pc;
+static u16 cur_ssw;
+
+/*
+ * Write watchpoint (shell "watch"): the page stays write-protected in the
+ * shadow; a write to it is logged, let through for one instruction (trace)
+ * and the page protected again. Kept across guest restarts.
+ */
+#define NWLOG		8
+static u32 watch_va;
+static struct { u32 pc, va; } wlog[NWLOG];
+static u32 nwlog, nwatch;
+static u32 watch_open;			/* va made writable for one step */
+static u32 watch_val;			/* value after the last logged write */
+
+static int walk_trace;			/* shell "pt": print each descriptor */
+
+static u32
+pmask(u32 bits)
+{
+	return bits >= 32 ? 0xffffffff : (1u << bits) - 1;
+}
+
+static u32
+prd(u32 pa)
+{
+	return *(volatile u32 *)(uintptr_t)pa;
+}
+
+static void
+pwr(u32 pa, u32 v)
+{
+	*(volatile u32 *)(uintptr_t)pa = v;
+}
+
+static void *
+pool_alloc(u32 size)
+{
+	void *p;
+
+	if (pool_used + size > POOL_SIZE)
+		return NULL;
+	p = pool + pool_used;
+	pool_used += size;
+	memset(p, 0, size);
+	return p;
+}
+
+/* Drop all shadow tables and start again with empty roots. */
+static void
+shadow_clear(void)
+{
+	int i;
+
+	pool_used = 0;
+	for (i = 0; i < 2; i++) {
+		views[i].l1 = pool_alloc(SH_L1 * 4);
+		views[i].crp[0] = 0x7fff0002;	/* upper limit 7fff, short */
+		views[i].crp[1] = (u32)(uintptr_t)views[i].l1;
+		tlb_clear(&views[i]);
+	}
+}
+
+/* 4 KB aligned scratch memory for the boot-time MMU self-test */
+u32
+vmmu_scratch(u32 size)
+{
+	u32 a = ((u32)(uintptr_t)pool + 0xfff) & ~0xfffu;
+
+	return a + size <= (u32)(uintptr_t)pool + POOL_SIZE ? a : 0;
+}
+
+void
+vmmu_reset(void)
+{
+	enabled = cpuinfo.model == 30 && cpuinfo.mmu_ok;
+	n_fill = n_wp = n_guestfault = n_flush = nflog = 0;
+	n_reset++;
+	shadow_clear();
+	if (loaded >= 0)
+		mmu030_flush();
+}
+
+void
+vmmu_flush(void)
+{
+	n_flush++;
+	shadow_clear();
+	if (loaded >= 0)
+		mmu030_root(views[loaded].crp);
+}
+
+void
+vmmu_activate(void)
+{
+	int v = (guest.vsr & VSR_S) != 0;
+
+	if (!enabled || loaded == v)
+		return;
+	if (loaded < 0)
+		mmu030_load(views[v].crp, SH_TC, SH_TT0);
+	else
+		mmu030_root(views[v].crp);
+	loaded = v;
+}
+
+void
+vmmu_off(void)
+{
+	if (loaded >= 0)
+		mmu030_off();
+	loaded = -1;
+}
+
+/* ------------------------------------------------------------------ */
+/* The guest's tables                                                  */
+
+struct walk {
+	u32 pa;
+	u32 desc;			/* address of the last descriptor */
+	u32 pdesc;			/* page descriptor, 0 for TT/no MMU */
+	int wp, ci, mod;
+	u32 levels;
+};
+
+/* 68030 TT0/TT1 match for a data access */
+static int
+tt_match(u32 tt, u32 va, u32 fc, int write)
+{
+	u32 base = tt >> 24, mask = (tt >> 16) & 0xff;
+	u32 fcbase = (tt >> 4) & 7, fcmask = tt & 7;
+
+	if (!(tt & 0x8000))
+		return 0;
+	if (((va >> 24) & ~mask & 0xff) != (base & ~mask))
+		return 0;
+	if ((fc & ~fcmask & 7) != (fcbase & ~fcmask))
+		return 0;
+	return (tt & 0x0100) || (!(tt & 0x0200) == !!write);
+}
+
+/*
+ * Walk the guest's tables like the 68030 does (up to 'maxlev' levels;
+ * 7 = all). update: set U in the descriptors used, M in the page
+ * descriptor on a write that is allowed. Returns MMUSR bits.
+ */
+static u16
+walk(u32 va, u32 fc, int write, int update, u32 maxlev, struct walk *w)
+{
+	u32 tc = guest.tc, ti[5], n = 0, i, idx, lim, bits, a;
+	u32 d0, d1, dt, nd0, nd1, ea, ps;
+	int cur_long, s = 0;
+	u16 sr = 0;
+
+	w->wp = w->ci = w->mod = 0;
+	w->pdesc = w->desc = 0;
+	w->levels = 0;
+	w->pa = va;
+	if (tt_match(guest.tt0, va, fc, write) ||
+	    tt_match(guest.tt1, va, fc, write)) {
+		sr = MMUSR_T;
+		goto phys;
+	}
+	if (!(tc & TC_E))
+		goto phys;
+	ps = (tc >> 20) & 15;
+	if (tc & TC_FCL)
+		ti[n++] = 0;			/* function code level */
+	for (i = 0; i < 4 && ((tc >> (12 - 4 * i)) & 15); i++)
+		ti[n++] = (tc >> (12 - 4 * i)) & 15;
+	if ((fc & 4) && (tc & TC_SRE)) {
+		d0 = guest.srp[0];
+		d1 = guest.srp[1];
+	} else {
+		d0 = guest.crp[0];
+		d1 = guest.crp[1];
+	}
+	cur_long = 1;
+	dt = d0 & D_DT;
+	bits = 32 - ((tc >> 16) & 15);		/* after the initial shift */
+	a = va << ((tc >> 16) & 15);
+	for (i = 0; i < n && dt >= DT_SHORT; i++) {
+		if (w->levels >= maxlev)
+			goto done;
+		if (ti[i] == 0) {		/* FCL: indexed by FC */
+			idx = fc & 7;
+		} else {
+			idx = a >> (32 - ti[i]);
+			a <<= ti[i];
+			bits -= ti[i];
+		}
+		if (cur_long) {
+			lim = (d0 >> 16) & 0x7fff;
+			if ((d0 & 0x80000000) ? idx < lim : idx > lim) {
+				sr |= MMUSR_L;
+				goto done;
+			}
+		}
+		ea = ((cur_long ? d1 : d0) & ~0xf) + idx * (dt == DT_LONG ? 8 : 4);
+		nd0 = prd(ea);
+		nd1 = dt == DT_LONG ? prd(ea + 4) : 0;
+		if (walk_trace)
+			kprintf("  level %u: index %x, %s descriptor at %08x: %08x"
+			    " %08x\n", w->levels + 1, idx, dt == DT_LONG ? "long" :
+			    "short", ea, nd0, dt == DT_LONG ? nd1 : 0);
+		w->desc = ea;
+		w->levels++;
+		if ((nd0 & D_DT) == 0) {
+			sr |= MMUSR_I;
+			goto done;
+		}
+		if (update && (nd0 & D_DT) != DT_PAGE && !(nd0 & D_U))
+			pwr(ea, nd0 |= D_U);	/* table descriptor used */
+		if (nd0 & D_WP)
+			w->wp = 1;
+		if (dt == DT_LONG && (nd0 & D_S))
+			s = 1;
+		cur_long = dt == DT_LONG;
+		d0 = nd0;
+		d1 = nd1;
+		dt = nd0 & D_DT;
+	}
+	if (dt == DT_SHORT || dt == DT_LONG) {	/* indirect descriptor */
+		if (w->levels >= maxlev)
+			goto done;
+		ea = (cur_long ? d1 : d0) & ~3;
+		cur_long = dt == DT_LONG;
+		d0 = prd(ea);
+		d1 = cur_long ? prd(ea + 4) : 0;
+		w->desc = ea;
+		w->levels++;
+		if (walk_trace)
+			kprintf("  indirect: page descriptor at %08x: %08x %08x\n",
+			    ea, d0, d1);
+		if ((d0 & D_DT) != DT_PAGE) {
+			sr |= MMUSR_I;
+			goto done;
+		}
+		if (d0 & D_WP)
+			w->wp = 1;
+		if (cur_long && (d0 & D_S))
+			s = 1;
+	} else if (dt != DT_PAGE) {
+		sr |= MMUSR_I;
+		goto done;
+	}
+	/* d0/d1: page descriptor (normal or early termination) at w->desc */
+	w->pdesc = w->desc;
+	w->ci = (d0 & D_CI) != 0;
+	w->pa = (((cur_long ? d1 : d0) & ~0xff) & ~pmask(ps)) +
+	    (va & pmask(bits));
+	if (s && !(fc & 4))
+		sr |= MMUSR_S;
+	if (w->wp)
+		sr |= MMUSR_W;
+	if (!(sr & MMUSR_S) && !(write && w->wp) && update && w->pdesc) {
+		u32 nv = d0 | D_U | (write ? D_M : 0);
+
+		if (nv != d0)
+			pwr(w->pdesc, d0 = nv);
+	}
+	w->mod = (d0 & D_M) != 0;
+	if (d0 & D_M)
+		sr |= MMUSR_M;
+phys:
+	if (w->pa >= bootcap.hole_base && w->pa < bootcap.hole_top)
+		sr |= MMUSR_B;
+	if (!w->pdesc)
+		w->mod = 1;			/* untranslated: no M bit to keep */
+done:
+	return sr | (u16)(w->levels & MMUSR_N);
+}
+
+u16
+vmmu_translate(u32 va, int super, int write, u32 *pa)
+{
+	struct view *v = &views[super != 0];
+	struct tlb *t = &v->tlb[(va >> 8) & (NTLB - 1)];
+	struct walk w;
+	u16 sr;
+
+	if ((va & ~(u32)0xff) == t->va && (t->w || !write)) {
+		*pa = t->pa | (va & 0xff);
+		return 0;
+	}
+	sr = walk(va, super ? 5 : 1, write, 1, 7, &w);
+	if ((sr & MMUSR_FAULT) || (write && (sr & MMUSR_W)))
+		return sr & (MMUSR_FAULT | MMUSR_W);
+	*pa = w.pa;
+	t->va = va & ~(u32)0xff;		/* smallest 68030 page */
+	t->pa = w.pa & ~(u32)0xff;
+	t->w = !w.wp && w.mod;
+	return 0;
+}
+
+u16
+vmmu_ptest(u32 va, u32 fc, int write, u32 level, u32 *desc)
+{
+	struct walk w;
+	u16 sr;
+
+	(void)write;
+	sr = walk(va, fc, 0, 0, level ? level : 7, &w);
+	if (level == 0)			/* level 0: the ATC's view, no N */
+		sr = (u16)(sr & ~MMUSR_N);
+	*desc = w.desc;
+	return sr;
+}
+
+/* ------------------------------------------------------------------ */
+/* Shadow fill                                                         */
+
+/* Install the mapping for one shadow page. 0 or -1 (pool exhausted). */
+static int
+shadow_set(struct view *v, u32 va, u32 pd)
+{
+	u32 *l2, *l3, i1 = va >> 24, i2 = (va >> 16) & 0xff;
+
+	if (!(v->l1[i1] & D_DT)) {
+		if (!(l2 = pool_alloc(SH_L2 * 4)))
+			return -1;
+		v->l1[i1] = (u32)(uintptr_t)l2 | DT_SHORT;
+	}
+	l2 = (u32 *)(uintptr_t)(v->l1[i1] & ~0xf);
+	if (!(l2[i2] & D_DT)) {
+		if (!(l3 = pool_alloc(SH_L3 * 4)))
+			return -1;
+		l2[i2] = (u32)(uintptr_t)l3 | DT_SHORT;
+	}
+	l3 = (u32 *)(uintptr_t)(l2[i2] & ~0xf);
+	l3[(va >> 11) & 31] = pd;
+	return 0;
+}
+
+static u32
+shadow_get(const struct view *v, u32 va)
+{
+	u32 d = v->l1[va >> 24];
+
+	if (!(d & D_DT))
+		return 0;
+	d = ((u32 *)(uintptr_t)(d & ~0xf))[(va >> 16) & 0xff];
+	if (!(d & D_DT))
+		return 0;
+	return ((u32 *)(uintptr_t)(d & ~0xf))[(va >> 11) & 31];
+}
+
+/*
+ * Make the shadow map va for this access if the guest's tables allow it.
+ * 1: mapped now, 0: already mapped as asked (not a shadow miss),
+ * -1: the guest's tables refuse it.
+ */
+static int
+shadow_fill(u32 va, int write)
+{
+	int super = (guest.vsr & VSR_S) != 0;
+	struct view *v = &views[super];
+	u32 old = shadow_get(v, va), pd;
+	struct walk w;
+	u16 sr;
+
+	if ((old & D_DT) && (!write || !(old & D_WP)))
+		return 0;
+	sr = walk(va, super ? 5 : 1, write, 1, 7, &w);
+	if ((sr & MMUSR_FAULT) || (write && w.wp)) {
+		if (nflog < NLOG) {
+			flog[nflog].va = va;
+			flog[nflog].pc = cur_pc;
+			flog[nflog].ssw = cur_ssw;
+			flog[nflog].mmusr = sr;
+			flog[nflog].super = (u8)super;
+			flog[nflog++].write = (u8)write;
+		}
+		n_guestfault++;
+		return -1;
+	}
+	/* write-protect until the guest's M bit is set, so it gets set */
+	pd = ((w.pa & ~(SH_PAGE - 1)) | D_U | D_M | DT_PAGE) |
+	    (w.ci ? D_CI : 0) | (w.wp || !w.mod ? D_WP : 0);
+	if (watch_va && !((w.pa ^ watch_va) & ~(SH_PAGE - 1))) {
+		if (!watch_open)
+			pd |= D_WP;
+		else
+			pd &= ~(u32)D_WP;
+	}
+	if (shadow_set(v, va, pd)) {
+		shadow_clear();			/* pool full: start over */
+		v = &views[super];
+		if (shadow_set(v, va, pd))
+			return -1;
+	}
+	if (old & D_DT)
+		n_wp++;
+	else
+		n_fill++;
+	tlb_clear(v);
+	if (loaded >= 0)
+		mmu030_root(views[loaded].crp);	/* also flushes the ATC */
+	return 1;
+}
+
+/*
+ * 68030 bus error frames (format A short, B long): SSW at +0x0A, data
+ * fault address at +0x10, stage B address at +0x24 (format B only;
+ * otherwise PC + 4). Stage C is the word before stage B.
+ */
+int
+vmmu_fault(struct excregs *r)
+{
+	const u8 *f = (const u8 *)&r->sr;
+	u16 ssw = *(const u16 *)(f + 0x0a);
+	u32 fmt = r->fmtvec >> 12, sb, done = 0;
+	int k;
+
+	if (!enabled || (fmt != 0xa && fmt != 0xb))
+		return -1;
+	sb = fmt == 0xb ? *(const u32 *)(f + 0x24) : r->pc + 4;
+	cur_pc = r->pc;
+	cur_ssw = ssw;
+	if (ssw & 0x8000) {			/* FC: stage C fetch */
+		if ((k = shadow_fill(sb - 2, 0)) < 0)
+			return -1;
+		done += (u32)k;
+	}
+	if (ssw & 0x4000) {			/* FB: stage B fetch */
+		if ((k = shadow_fill(sb, 0)) < 0)
+			return -1;
+		done += (u32)k;
+	}
+	if (ssw & 0x0100) {			/* DF: data cycle */
+		u32 da = *(const u32 *)(f + 0x10);
+		int write = !(ssw & 0x0040);
+
+		struct walk w;
+		u16 sr = write && watch_va ?
+		    walk(da, guest.vsr & VSR_S ? 5 : 1, 1, 0, 7, &w) : MMUSR_I;
+
+		if (!(sr & MMUSR_FAULT) &&
+		    !((w.pa ^ watch_va) & ~(SH_PAGE - 1))) {
+			if (!w.wp) {
+				nwatch++;
+				if (w.pa + 4 > watch_va && w.pa < watch_va + 4 &&
+				    nwlog < NWLOG) {
+					wlog[nwlog].pc = r->pc;
+					wlog[nwlog++].va = da;
+				}
+				watch_open = da;
+				shadow_fill(da, 1);
+				return 1;		/* step it, then close */
+			}
+		}
+		if ((k = shadow_fill(da, write)) < 0)
+			return -1;
+		done += (u32)k;
+	}
+	return done ? 0 : -1;			/* nothing missing: real error */
+}
+
+/* trace after a watched write: protect the page again */
+int
+vmmu_watch_step(void)
+{
+	struct view *v;
+	u32 pd;
+
+	if (!watch_open)
+		return 0;
+	watch_val = prd(watch_va);
+	v = &views[(guest.vsr & VSR_S) != 0];
+	pd = shadow_get(v, watch_open);
+	if (pd & D_DT)
+		shadow_set(v, watch_open, pd | D_WP);
+	watch_open = 0;
+	if (loaded >= 0)
+		mmu030_root(views[loaded].crp);
+	return 1;
+}
+
+/*
+ * The watched long changed without a write through the MMU (DMA, or
+ * SORIX-LDOM itself)? Checked on every entry from the guest.
+ */
+int
+vmmu_watch_check(u32 *old, u32 *now)
+{
+	u32 v;
+
+	if (!watch_va || watch_open)
+		return 0;
+	v = prd(watch_va);
+	if (v == watch_val)
+		return 0;
+	*old = watch_val;
+	*now = watch_val = v;
+	return 1;
+}
+
+void
+vmmu_watch(u32 va)
+{
+	watch_va = va;
+	watch_val = va ? prd(va) : 0;
+	nwlog = nwatch = 0;
+	watch_open = 0;
+	shadow_clear();
+	if (loaded >= 0)
+		mmu030_root(views[loaded].crp);
+}
+
+/* shell "pt": the guest's table walk for va, descriptor by descriptor */
+void
+vmmu_dump(u32 va, int super)
+{
+	struct walk w;
+	u16 sr;
+	u32 pd;
+
+	kprintf("guest TC %08x, %s root %08x %08x\n", guest.tc,
+	    super && (guest.tc & TC_SRE) ? "SRP" : "CRP",
+	    super && (guest.tc & TC_SRE) ? guest.srp[0] : guest.crp[0],
+	    super && (guest.tc & TC_SRE) ? guest.srp[1] : guest.crp[1]);
+	walk_trace = 1;
+	sr = walk(va, super ? 5 : 1, 0, 0, 7, &w);
+	walk_trace = 0;
+	kprintf("  -> %08x, MMUSR %04x%s%s%s%s%s\n", w.pa, sr,
+	    sr & MMUSR_I ? " invalid" : "", sr & MMUSR_W ? " write-protected" : "",
+	    sr & MMUSR_S ? " supervisor-only" : "", sr & MMUSR_L ? " limit" : "",
+	    sr & MMUSR_B ? " SORIX-LDOM hole" : "");
+	pd = shadow_get(&views[super != 0], va);
+	kprintf("  shadow (%s view): %08x\n", super ? "kernel" : "user", pd);
+}
+
+void
+vmmu_show(void)
+{
+	if (!enabled && !watch_va) {
+		kprintf("  shadow MMU: off (68030 only so far)\n");
+		return;
+	}
+	kprintf("  shadow MMU: guest TC %08x CRP %08x%08x SRP %08x%08x\n",
+	    guest.tc, guest.crp[0], guest.crp[1], guest.srp[0], guest.srp[1]);
+	kprintf("  shadow MMU: %u fills, %u M-bit upgrades, %u guest faults, "
+	    "%u flushes, pool %u/%u bytes\n", n_fill, n_wp, n_guestfault,
+	    n_flush, pool_used, POOL_SIZE);
+	if (watch_va)
+		kprintf("  watch %08x: %u writes to its page\n", watch_va, nwatch);
+	for (u32 i = 0; i < nwlog; i++)
+		kprintf("  watch: write via %08x at PC %08x\n", wlog[i].va,
+		    wlog[i].pc);
+	for (u32 i = 0; i < nflog; i++)
+		kprintf("  guest fault: %s %s %08x at PC %08x, SSW %04x, "
+		    "MMUSR %04x\n", flog[i].super ? "kernel" : "user",
+		    flog[i].write ? "write" : "read", flog[i].va, flog[i].pc,
+		    flog[i].ssw, flog[i].mmusr);
+}

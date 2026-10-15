@@ -300,6 +300,18 @@ def test_one(cpu, adf, hdf, ctrl="scsi", amix_hdf=None):
                 amiga.expect(rb"rebooting; AmigaOS will start from DH0", 10)
                 amiga.expect(rb"boot request: AmigaOS from DH0", 60)
                 amiga.expect(rb"declining to boot from the floppy", 10)
+            # last: AMIX deprivileged takes over SCSI and chip RAM
+            if amix_hdf and cpu == "030":
+                # AMIX deprivileged (shadow MMU): up to its banner
+                step = "boot -pv"
+                amiga.send(b"boot -pv unix_root:\r")
+                amiga.expect(rb"starting AMIX deprivileged", 120)
+                time.sleep(25)
+                amiga.send(b"\x03")
+                amiga.expect(rb"amix stopped \(Ctrl-C\)", 20)
+                amiga.expect(re.escape(PROMPT), 10)
+                shell("guest log", rb"Available Unix  memory = \d+")
+                shell("guest", rb"shadow MMU: \d+ fills")
     except TimeoutError as e:
         tail = (amiga.buf or b"")[-600:].decode("latin-1")
         print(f"uae.py test: {cpu} {ctrl}: FAIL at '{step}' waiting for {e} "

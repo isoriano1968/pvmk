@@ -114,3 +114,69 @@ safe_copy:
 	move.l	%d7,%d0
 	movem.l	(%sp)+,%d2-%d7/%a2-%a6
 	rts
+
+/*
+ * void vcpu_enter_frame(const struct vctx *c, const void *frame, u32 size,
+ *     u32 ssp)   -- does not return
+ * Enter the guest through an exception frame of any format (the guest's
+ * RTE of a bus error frame: the CPU continues or reruns the faulted
+ * access). The frame's SR must already be the real SR (user mode).
+ */
+	.globl	vcpu_enter_frame
+vcpu_enter_frame:
+	move.w	#0x2700,%sr
+	move.l	4(%sp),%a0
+	move.l	8(%sp),%a1
+	move.l	12(%sp),%d0
+	move.l	16(%sp),%sp
+	sub.l	%d0,%sp
+	move.l	%sp,%a2
+	lsr.l	#1,%d0
+	bra.s	2f
+1:	move.w	(%a1)+,(%a2)+
+2:	subq.l	#1,%d0
+	bpl.s	1b
+	move.l	60(%a0),%a1		/* a[7]: guest A7 */
+	move.l	%a1,%usp
+	movem.l	(%a0),%d0-%d7/%a0-%a6
+	rte
+
+/*
+ * 68030 MMU for the shadow tables (MMU instructions as .short: the file
+ * assembles for -m68020-60).
+ *
+ * void mmu030_load(const u32 *crp, u32 tc, u32 tt0)
+ */
+	.globl	mmu030_load, mmu030_root, mmu030_flush, mmu030_off
+mmu030_load:
+	lea	12(%sp),%a0
+	.short	0xf010,0x0800			/* pmove (%a0),%tt0 */
+	move.l	4(%sp),%a0
+	.short	0xf010,0x4c00			/* pmove (%a0),%crp */
+	.short	0xf000,0x2400			/* pflusha */
+	lea	8(%sp),%a0
+	.short	0xf010,0x4000			/* pmove (%a0),%tc */
+	rts
+
+/* void mmu030_root(const u32 *crp): new root, flush the ATC */
+mmu030_root:
+	move.l	4(%sp),%a0
+	.short	0xf010,0x4c00			/* pmove (%a0),%crp */
+	.short	0xf000,0x2400			/* pflusha */
+	rts
+
+/* void mmu030_flush(void) */
+mmu030_flush:
+	.short	0xf000,0x2400			/* pflusha */
+	rts
+
+/* void mmu030_off(void): translation and TT0/TT1 off */
+mmu030_off:
+	clr.l	-(%sp)
+	move.l	%sp,%a0
+	.short	0xf010,0x4000			/* pmove (%a0),%tc */
+	.short	0xf010,0x0800			/* pmove (%a0),%tt0 */
+	.short	0xf010,0x0c00			/* pmove (%a0),%tt1 */
+	.short	0xf000,0x2400			/* pflusha */
+	addq.l	#4,%sp
+	rts

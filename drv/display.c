@@ -78,6 +78,13 @@ draw(int c)
 }
 
 void
+display_off(void)
+{
+	C(DMACON) = 0x0180;			/* bitplane and Copper DMA off */
+	plane = NULL;
+}
+
+void
 display_putc(int c)
 {
 	if (!plane)

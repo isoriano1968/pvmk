@@ -15,6 +15,7 @@
  * B[0] -> C, C[0] = page. 68040/68060 (TC: 4 KB pages): root[0x60] ->
  * pointer table, pointer[0] -> page table, page[0] = page.
  */
+#include "pvmk/vmmu.h"
 #include "pvmk/bootcap.h"
 #include "pvmk/kprintf.h"
 #include "pvmk/layout.h"
@@ -39,7 +40,7 @@ mmu_result(void)
 int
 mmu_selftest(void)
 {
-	u32 page = (bootcap.image_base + bootcap.image_size + 0xfff) & ~0xfffu;
+	u32 page = vmmu_scratch(0x2000);	/* the shadow pool, still unused */
 	u32 tab = page + 0x1000, out = 0, regs[6];
 	volatile u32 *pg = (volatile u32 *)(uintptr_t)page;
 	u32 *t = (u32 *)(uintptr_t)tab;
@@ -50,7 +51,7 @@ mmu_selftest(void)
 		result_text = "no MMU (68020)";
 		return 0;
 	}
-	if (tab + 0x1000 > sstack_top() - SSTACK_SIZE) {
+	if (!page) {
 		result_text = "no room for test tables";
 		return 0;
 	}

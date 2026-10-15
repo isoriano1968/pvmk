@@ -35,7 +35,18 @@ struct amix_kernel {
 	u32 end;			/* end of bss (incl. COMMON symbols) */
 	u32 nrel;			/* relocations applied */
 	u32 type;			/* ELF e_type */
+	/* the kernel's console message buffer (putbuf), if found */
+	u32 putbuf, putbufsz, putbufwpos;
+	/* for the PV patches (deprivileged start) */
+	u32 lcopyin, lcopyout, sf_fault, u, haltsys;
+	u32 loadedcoplist;		/* its display's copper lists, for resume */
+	u32 execingcoplist;
 };
+
+/* Deprivileged start: replace copy loops and haltsys with hypercalls
+ * (kernel already at its final address). Returns the number of routines
+ * patched (3 for the stock 2.1c kernel). */
+int amix_pv_patch(const struct amix_kernel *k);
 
 /* Relocate an ELF kernel image in place for text at base. 0 on success;
  * otherwise a message has been printed. */

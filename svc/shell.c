@@ -10,6 +10,7 @@
 #include "pvmk/bootcap.h"
 #include "pvmk/bootreq.h"
 #include "pvmk/conf.h"
+#include "pvmk/display.h"
 #include "pvmk/ffs.h"
 #include "pvmk/gdb.h"
 #include "pvmk/keyboard.h"
@@ -22,6 +23,7 @@
 #include "pvmk/scsi.h"
 #include "pvmk/ufs.h"
 #include "pvmk/vcpu.h"
+#include "pvmk/vmmu.h"
 #include "pvmk/z3660.h"
 #include "pvmk/version.h"
 
@@ -33,6 +35,7 @@
 static char hist[HIST][LINE_MAX];
 static u32 nhist;
 static int autoboot_done;
+static int screen_taken;		/* console on screen, guest stopped */
 
 /* ------------------------------------------------------------------ */
 /* Input                                                               */
@@ -485,19 +488,30 @@ cmd_ls(int argc, char **argv)
 static void
 cmd_md(int argc, char **argv)
 {
-	u32 addr, len = 0x40, i, j;
+	u32 addr, len = 0x40, i, j, pa;
+	int g = argc > 1 && streq(argv[1], "-g");	/* guest kernel view */
 
-	if (!need_num(argv[1], &addr, "address"))
+	if (g) {
+		argc--;
+		argv++;
+	}
+	if (argc < 2 || !need_num(argv[1], &addr, "address"))
 		return;
 	if (argc > 2 && !need_num(argv[2], &len, "length"))
 		return;
 	for (i = 0; i < len; i += 16) {
-		volatile const u8 *p = (volatile const u8 *)(uintptr_t)(addr + i);
 		u32 n = len - i < 16 ? len - i : 16;
 		u8 b[16];
 
-		for (j = 0; j < n; j++)
-			b[j] = p[j];
+		for (j = 0; j < n; j++) {
+			pa = addr + i + j;
+			if (g && vmmu_translate(addr + i + j, 1, 0, &pa)) {
+				kprintf("%08x: not mapped for the guest\n",
+				    addr + i + j);
+				return;
+			}
+			b[j] = *(volatile const u8 *)(uintptr_t)pa;
+		}
 		kprintf("%08x:", addr + i);
 		for (j = 0; j < 16; j++) {
 			if (j < n)
@@ -661,13 +675,64 @@ amix_load(const char *arg)
 	return 0;
 }
 
+/* MemHeader fields (exec/memory.h) */
+#define MH_LOWER	20
+#define MH_UPPER	24
+#define MH_FREE		28
+
 /*
- * Native AMIX start (boot method 3): the kernel gets the whole machine.
- * bootinfo, the handoff parameters and the initial stack live in the
- * SCSI bounce buffer in chip RAM, which nothing needs any more.
+ * Deprivileged AMIX start: the kernel runs as a guest of the virtual CPU.
+ * Its memory list ends below SORIX-LDOM's hole; the screen console stops
+ * (AMIX owns chip RAM, where the display and the SCSI bounce buffer are).
  */
 static void
-amix_start(void)
+amix_start_pv(struct amix_bootinfo *bi, u32 sp)
+{
+	u32 i, lo, up;
+
+	for (i = 0; i < AMIX_NAUTO; i++) {
+		u8 *mh = bi->memory[i];
+
+		lo = *(u32 *)(mh + MH_LOWER);
+		up = *(u32 *)(mh + MH_UPPER);
+		if (lo <= bootcap.hole_base && bootcap.hole_base < up) {
+			*(u32 *)(mh + MH_UPPER) = bootcap.hole_base;
+			*(u32 *)(mh + MH_FREE) = bootcap.hole_base - lo;
+			kprintf("boot: AMIX memory %08x-%08x (SORIX-LDOM above)\n",
+			    lo, bootcap.hole_base - 1);
+		}
+	}
+	memcpy((void *)(uintptr_t)amixk.bd.tvaddr,
+	    amix_image + amixk.bd.toffset, amixk.bd.tsize);
+	memcpy((void *)(uintptr_t)amixk.bd.rvaddr,
+	    amix_image + amixk.bd.roffset, amixk.bd.rsize);
+	memcpy((void *)(uintptr_t)amixk.bd.dvaddr,
+	    amix_image + amixk.bd.doffset, amixk.bd.dsize);
+	amix_image = NULL;			/* overwritten from now on */
+	kprintf("boot: PV patches: %d of 3 routines (copyin, copyout, "
+	    "haltsys)\n", amix_pv_patch(&amixk));
+	REG16(CUSTOM_INTENA) = 0x7fff;		/* quiet, as after a reset */
+	REG16(CUSTOM_INTREQ) = 0x7fff;
+	REG16(0xdff096) = 0x7dff;		/* DMACON: channels off, */
+	REG16(0xdff096) = 0x8200;		/* master on, as Kickstart has it */
+	cache_push_all(cpuinfo.model);
+	display_off();
+	screen_taken = 0;
+	vcpu_prepare("amix", amixk.bd.entry, sp, AMIX_EXEC1);
+	guest.ctx.d[1] = (u32)(uintptr_t)bi;
+	kprintf("boot: starting AMIX deprivileged at %08x (D0=3, D1=%p); "
+	    "Ctrl-C on serial breaks in\n", amixk.bd.entry, bi);
+	vcpu_resume();
+}
+
+/*
+ * AMIX start (boot method 3). Native: the kernel gets the whole machine.
+ * pv: it runs deprivileged under SORIX-LDOM. bootinfo, the handoff
+ * parameters and the initial stack live in the SCSI bounce buffer in chip
+ * RAM, which nothing needs any more.
+ */
+static void
+amix_start(int pv)
 {
 	u8 *chip = (u8 *)(uintptr_t)bootcap.scsi_chip;
 	struct amix_bootinfo *bi = (struct amix_bootinfo *)chip;
@@ -700,6 +765,9 @@ amix_start(void)
 	h->dsize = amixk.bd.dsize;
 	h->cpu = cpuinfo.model;
 
+	if (pv)
+		amix_start_pv(bi, h->sp);
+	vmmu_off();
 	kprintf("boot: starting AMIX natively at %08x (D0=3, D1=%p): it gets "
 	    "the whole machine, SORIX-LDOM is gone until the next reset\n",
 	    h->entry, bi);
@@ -707,6 +775,38 @@ amix_start(void)
 	while (!(REG16(SERDATR) & (1 << SERDATR_TSRE)))
 		;
 	amix_enter(h);
+}
+
+/*
+ * AMIX's console message buffer (putbuf, a ring of putbufsz bytes;
+ * putbufwpos counts the bytes written), oldest first.
+ */
+static void
+amix_log(void)
+{
+	u32 sz, wpos, i, n;
+	const volatile u8 *buf;
+
+	if (!amixk.putbuf || !amixk.putbufsz || !amixk.putbufwpos) {
+		kprintf("guest log: no AMIX kernel with putbuf loaded\n");
+		return;
+	}
+	sz = *(volatile u32 *)(uintptr_t)amixk.putbufsz;
+	wpos = *(volatile u32 *)(uintptr_t)amixk.putbufwpos;
+	buf = (const volatile u8 *)(uintptr_t)amixk.putbuf;
+	if (!sz || sz > 0x10000) {
+		kprintf("guest log: putbufsz %u?\n", sz);
+		return;
+	}
+	n = wpos < sz ? wpos : sz;
+	for (i = 0; i < n; i++) {
+		u8 c = buf[(wpos - n + i) % sz];
+
+		if (c)
+			con_putc(c);
+	}
+	kprintf("\n[guest log: %u bytes written, buffer %u at %08x]\n", wpos,
+	    sz, amixk.putbuf);
 }
 
 static void
@@ -761,20 +861,99 @@ cmd_gdb(int argc, char **argv)
 	gdb_main();
 }
 
+/*
+ * The screen while a guest that owns it is stopped from the keyboard:
+ * SORIX-LDOM's console comes back on its chip RAM block, which the guest
+ * may be using, so the block and the DMA enables are saved first and
+ * given back on resume, with the guest's copper list (AMIX: the view in
+ * ExecingCopList, or one just loaded in LoadedCopList; the copper program
+ * address at +12, +8 for the other interlace field).
+ */
+static u8 disp_save[DISP_CHIP_SIZE];
+static u16 dmacon_save;
+
+static void
+screen_take(void)
+{
+	if (screen_taken || !bootcap.disp_chip)
+		return;
+	memcpy(disp_save, (void *)(uintptr_t)bootcap.disp_chip, DISP_CHIP_SIZE);
+	dmacon_save = REG16(0xdff002);			/* DMACONR */
+	display_init(bootcap.disp_chip, bootcap.vblank == 50, bootcap.font);
+	kbd_init((int)bootcap.conf.keymap);
+	screen_taken = 1;
+	kprintf("SORIX-LDOM console (guest %s stopped; resume to go back)\n",
+	    guest.name);
+}
+
+static void
+screen_give(void)
+{
+	u32 cl = 0, cop = 0;
+
+	if (!screen_taken)
+		return;
+	display_off();
+	memcpy((void *)(uintptr_t)bootcap.disp_chip, disp_save, DISP_CHIP_SIZE);
+	if (amixk.execingcoplist)
+		cl = *(volatile u32 *)(uintptr_t)amixk.execingcoplist;
+	if (!cl && amixk.loadedcoplist)
+		cl = *(volatile u32 *)(uintptr_t)amixk.loadedcoplist;
+	if (cl) {
+		cop = *(volatile u32 *)(uintptr_t)(cl + 12);
+		if (!cop)
+			cop = *(volatile u32 *)(uintptr_t)(cl + 8);
+	}
+	if (cop) {
+		*(volatile u32 *)0xdff080 = cop;	/* COP1LC */
+		REG16(0xdff088) = 0;			/* COPJMP1 */
+	} else
+		kprintf("resume: guest copper list not found; its screen comes "
+		    "back when it loads a new one\n");
+	REG16(0xdff096) = (u16)(0x8000 | (dmacon_save & 0x07ff));
+	screen_taken = 0;
+}
+
 static void
 cmd_resume(int argc, char **argv)
 {
 	(void)argc;
 	(void)argv;
+	if (guest.active)
+		screen_give();
 	vcpu_resume();
 }
 
 static void
 cmd_guest(int argc, char **argv)
 {
-	(void)argc;
-	(void)argv;
+	if (argc > 1 && streq(argv[1], "log")) {
+		amix_log();
+		return;
+	}
 	vcpu_show();
+}
+
+static void
+cmd_pt(int argc, char **argv)
+{
+	u32 va;
+
+	if (argc < 2 || !need_num(argv[1], &va, "address"))
+		return;
+	vmmu_dump(va, !(argc > 2 && streq(argv[2], "u")));
+}
+
+static void
+cmd_watch(int argc, char **argv)
+{
+	u32 va = 0;
+
+	if (argc > 1 && !need_num(argv[1], &va, "address"))
+		return;
+	vmmu_watch(va);
+	kprintf(va ? "watch: guest writes to %08x are logged (guest)\n" :
+	    "watch: off\n", va);
 }
 
 static void
@@ -838,11 +1017,38 @@ reboot_to_kickstart(const char *dev, const char *what)
 	cmd_reset(0, NULL);
 }
 
+static char reboot_what[40];		/* last "boot -pv" target */
+
 static void
 cmd_boot(int argc, char **argv)
 {
-	const char *what = argc > 1 ? argv[1] : bootcap.conf.def;
+	const char *what;
 	struct partition *p;
+	int pv = 0;
+
+	if (argc > 1 && (streq(argv[1], "-pv") || streq(argv[1], "-native"))) {
+		pv = argv[1][1] == 'p';
+		argc--;
+		argv++;
+	}
+	what = argc > 1 ? argv[1] : bootcap.conf.def;
+	if (pv && !cpuinfo.mmu_ok) {
+		kprintf("boot: -pv needs a working MMU (MMU self-test %s)\n",
+		    mmu_result());
+		return;
+	}
+	if (pv) {				/* for a guest reboot */
+		u32 n = 0;
+
+		while (what[n] && n < sizeof(reboot_what) - 1) {
+			reboot_what[n] = what[n];
+			n++;
+		}
+		reboot_what[n] = 0;
+	}
+	if (pv && cpuinfo.model != 30)
+		kprintf("boot: warning: no shadow MMU on the 680%u yet; the "
+		    "guest runs untranslated\n", cpuinfo.model);
 
 	if (!*what) {
 		kprintf("usage: boot <partition>   (see part)\n");
@@ -888,7 +1094,7 @@ cmd_boot(int argc, char **argv)
 		reboot_to_kickstart(p->name, "AmigaOS");
 	} else if ((p->dostype >> 8) == 0x554e49) {
 		if (amix_load(what) == 0)
-			amix_start();
+			amix_start(pv);
 	}
 	else
 		kprintf("boot: %s: no loader for this partition type\n", p->name);
@@ -900,6 +1106,7 @@ cmd_reset(int argc, char **argv)
 	(void)argc;
 	(void)argv;
 	kprintf("reset: rebooting into Kickstart\n");
+	vmmu_off();
 	while (!(REG16(SERDATR) & (1 << SERDATR_TSRE)))
 		;
 	cold_reboot();
@@ -915,18 +1122,20 @@ static const struct cmd cmds[] = {
 	{ "cat",   "dev:path",          "print a file (AMIX UFS)", cmd_cat },
 	{ "scsi",  "",                  "rescan disks (A3000 SCSI, Z3660)", cmd_scsi },
 	{ "part",  "",                  "list partitions", cmd_part },
-	{ "md",    "<addr> [len]",      "memory dump", cmd_md },
+	{ "md",    "[-g] <addr> [len]", "memory dump (-g: guest kernel virtual)", cmd_md },
 	{ "mw",    "[.b|.w|.l] <a> <v>", "memory write (mw.b, mw.w, mw.l)", cmd_mw },
 	{ "regs",  "",                  "registers of the last exception", cmd_regs },
 	{ "dmesg", "[-p]",              "boot log (-p: previous boot)", cmd_dmesg },
 	{ "sload", "<addr> <len>",      "receive raw bytes over serial", cmd_sload },
 	{ "go",    "<addr>",            "call code at addr, print D0", cmd_go },
 	{ "load",  "dev:[path]",        "load and relocate an AMIX kernel", cmd_load },
-	{ "boot",  "<dev[:path]>",      "AmigaOS partition, or AMIX kernel", cmd_boot },
+	{ "boot",  "[-pv] <dev[:path]>", "AmigaOS partition, or AMIX kernel (-pv: deprivileged)", cmd_boot },
 	{ "pvtest", "[loop] [stop]",    "run the virtual CPU test guest", cmd_pvtest },
 	{ "gdb",   "",                  "serve GDB on the serial port (guest)", cmd_gdb },
-	{ "guest", "",                  "state of the stopped guest", cmd_guest },
+	{ "guest", "[log]",             "state of the stopped guest (log: AMIX messages)", cmd_guest },
 	{ "resume", "",                 "continue the stopped guest", cmd_resume },
+	{ "watch", "[addr]",            "log guest writes to addr (shadow MMU)", cmd_watch },
+	{ "pt",    "<addr> [u]",        "guest page table walk (u: user view)", cmd_pt },
 	{ "reset", "",                  "reboot into Kickstart", cmd_reset },
 	{ NULL, NULL, NULL, NULL },
 };
@@ -1005,6 +1214,19 @@ shell_main(void)
 
 	if (gdb_active)
 		gdb_main();		/* the guest stopped while GDB is attached */
+	if (guest.reboot && reboot_what[0]) {
+		char *argv[3] = { "boot", "-pv", reboot_what };
+
+		guest.reboot = 0;
+		kprintf("boot: guest reboot: boot -pv %s\n", reboot_what);
+		scsi_init();			/* after the guest's driver */
+		cmd_boot(3, argv);
+	}
+	guest.reboot = 0;
+	if (guest.kbd_break) {
+		guest.kbd_break = 0;
+		screen_take();
+	}
 	autoboot();
 	kprintf("type 'help' for commands\n");
 	con_interactive(1);

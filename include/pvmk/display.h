@@ -22,5 +22,6 @@
 /* Starts the display; font is FONT_CHARS glyphs of 8 bytes. */
 void display_init(u32 chipmem, int pal, const u8 *font);
 void display_putc(int c);	/* no-op until display_init() */
+void display_off(void);		/* stop: a guest owns chip RAM */
 
 #endif /* PVMK_DISPLAY_H */

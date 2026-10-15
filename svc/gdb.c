@@ -17,6 +17,7 @@
 #include "pvmk/mk.h"
 #include "pvmk/paula.h"
 #include "pvmk/vcpu.h"
+#include "pvmk/vmmu.h"
 
 #define PKTMAX		1024
 #define MAXBP		16
@@ -228,6 +229,29 @@ gdb_breakpoint_at(u32 addr)
 	return 0;
 }
 
+/*
+ * Guest memory as GDB sees it: virtual addresses in the guest's current
+ * view, translated through its own tables (the debugger may write to
+ * write-protected text). Faults on unmapped or nonexistent memory are
+ * errors, not crashes.
+ */
+static int
+guest_copy(u32 va, void *buf, u32 n, int to_guest)
+{
+	int super = (guest.vsr & VSR_S) != 0;
+	u8 *b = buf;
+	u32 i, pa;
+
+	for (i = 0; i < n; i++) {
+		if (vmmu_translate(va + i, super, 0, &pa))
+			return -1;
+		if (to_guest ? safe_copy((void *)(uintptr_t)pa, b + i, 1) :
+		    safe_copy(b + i, (const void *)(uintptr_t)pa, 1))
+			return -1;
+	}
+	return 0;
+}
+
 static int
 bp_insert(u32 addr)
 {
@@ -241,8 +265,8 @@ bp_insert(u32 addr)
 			freei = i;
 	}
 	if (freei < 0 || (addr & 1) ||
-	    safe_copy(&bps[freei].orig, (const void *)(uintptr_t)addr, 2) ||
-	    safe_copy((void *)(uintptr_t)addr, &bkpt, 2))
+	    guest_copy(addr, &bps[freei].orig, 2, 0) ||
+	    guest_copy(addr, &bkpt, 2, 1))
 		return -1;
 	bps[freei].addr = addr;
 	bps[freei].used = 1;
@@ -257,7 +281,7 @@ bp_remove(u32 addr)
 
 	for (i = 0; i < MAXBP; i++)
 		if (bps[i].used && bps[i].addr == addr) {
-			safe_copy((void *)(uintptr_t)addr, &bps[i].orig, 2);
+			guest_copy(addr, &bps[i].orig, 2, 1);
 			bps[i].used = 0;
 			icache_inval(cpuinfo.model);
 			return 0;
@@ -317,7 +341,7 @@ read_memory(const char *p)
 	len = get_hex(&p);
 	if (len > sizeof(buf) - 1)
 		len = sizeof(buf) - 1;
-	if (safe_copy(buf, (const void *)(uintptr_t)addr, len)) {
+	if (guest_copy(addr, buf, len, 0)) {
 		send_packet("E03");
 		return;
 	}
@@ -354,7 +378,7 @@ write_memory(const char *p)
 		buf[i] = (u8)(h << 4 | l);
 		p += 2;
 	}
-	if (safe_copy((void *)(uintptr_t)addr, buf, len)) {
+	if (guest_copy(addr, buf, len, 1)) {
 		send_packet("E03");
 		return;
 	}

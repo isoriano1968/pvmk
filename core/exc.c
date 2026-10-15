@@ -74,6 +74,16 @@ exception(struct excregs *r)
 		r->sr |= 0x0700;
 		return;
 	}
+	if (guest.running && (r->sr & 0x2000) && vec >= 25 && vec <= 31) {
+		/*
+		 * An interrupt for the guest taken in SORIX-LDOM: the guest
+		 * trapped at an interrupt level below it and the interrupt
+		 * came in before exc_entry masked them. Keep it pending; it is
+		 * taken again when the guest runs.
+		 */
+		r->sr |= 0x0700;
+		return;
+	}
 	if (!(r->sr & 0x2000) && guest.running) {
 		vcpu_exception(r);		/* from the guest (user mode) */
 		return;

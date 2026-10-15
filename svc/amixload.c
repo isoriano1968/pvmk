@@ -203,6 +203,39 @@ relocate_rel(u8 *elf, u32 size, u32 base, struct amix_kernel *k)
 		}
 	}
 
+	/* where the console message buffer went ("guest log") */
+	for (i = 0; i < nsyms; i++) {
+		struct sym *s = &syms[i];
+		u32 *want = NULL;
+
+		if (!s->name || s->shndx >= eh->shnum || !sh[s->shndx].addr)
+			continue;
+		if (name_is(strtab, strsize, s->name, "putbuf"))
+			want = &k->putbuf;
+		else if (name_is(strtab, strsize, s->name, "putbufsz"))
+			want = &k->putbufsz;
+		else if (name_is(strtab, strsize, s->name, "putbufwpos"))
+			want = &k->putbufwpos;
+		else if (name_is(strtab, strsize, s->name, "lcopyin"))
+			want = &k->lcopyin;
+		else if (name_is(strtab, strsize, s->name, "lcopyout"))
+			want = &k->lcopyout;
+		else if (name_is(strtab, strsize, s->name, "sf_fault"))
+			want = &k->sf_fault;
+		else if (name_is(strtab, strsize, s->name, "haltsys"))
+			want = &k->haltsys;
+		else if (name_is(strtab, strsize, s->name, "LoadedCopList"))
+			want = &k->loadedcoplist;
+		else if (name_is(strtab, strsize, s->name, "ExecingCopList"))
+			want = &k->execingcoplist;
+		if (want)
+			*want = sh[s->shndx].addr + s->value;
+	}
+	for (i = 0; i < nsyms; i++)		/* the u area: absolute */
+		if (syms[i].name && syms[i].shndx == SHN_ABS &&
+		    name_is(strtab, strsize, syms[i].name, "u"))
+			k->u = syms[i].value;
+
 	/* relocations of the loaded sections */
 	for (i = 0; i < eh->shnum; i++) {
 		struct shdr *rs = &sh[i], *target;
@@ -270,6 +303,88 @@ relocate_rel(u8 *elf, u32 size, u32 base, struct amix_kernel *k)
 	}
 	k->end = end;
 	return 0;
+}
+
+/*
+ * PV patch: lcopyin/lcopyout (ml/fpu.s) copy with one MOVES per longword,
+ * every one of them trapping when the kernel runs deprivileged. Replaced
+ * by one hypercall with the same contract: u.u_caddrflt (u+0x374) = sf_fault
+ * while copying, 0 and D0 = 0 when done; a fault on the way gives the
+ * kernel a restartable bus error at the TRAP, with A0/A1/D1 advanced.
+ *
+ *	move.l	#sf_fault,u+0x374
+ *	move.l	4(sp),a0		source
+ *	move.l	8(sp),a1		destination
+ *	move.l	12(sp),d1		length
+ *	moveq	#HC_COPYxx,d0
+ *	trap	#15
+ *	clr.l	u+0x374
+ *	moveq	#0,d0
+ *	rts
+ */
+#define HC_COPYIN	10
+#define HC_COPYOUT	11
+#define CAADDRFLT	0x374
+
+static int
+patch_copy(u32 at, u16 movec_cr, u32 hc, const struct amix_kernel *k)
+{
+	u16 *p = (u16 *)(uintptr_t)at;
+	u32 flt = k->u + CAADDRFLT;
+	u16 stub[18] = {
+		0x23fc, (u16)(k->sf_fault >> 16), (u16)k->sf_fault,
+		(u16)(flt >> 16), (u16)flt,
+		0x206f, 0x0004, 0x226f, 0x0008, 0x222f, 0x000c,
+		(u16)(0x7000 | hc), 0x4e4f,
+		0x42b9, (u16)(flt >> 16), (u16)flt,
+		0x7000, 0x4e75,
+	};
+	u32 i;
+
+	/* moveq #1,d0; movec d0,sfc/dfc: the code this was written for */
+	if (!at || p[0] != 0x7001 || p[1] != 0x4e7b || p[2] != movec_cr)
+		return 0;
+	for (i = 0; i < 18; i++)
+		p[i] = stub[i];
+	return 1;
+}
+
+/*
+ * PV patch: haltsys(thenwhat) (amiga/kernel/servant.s) switches the MMU
+ * off and RESETs or spins with interrupts off. Under SORIX-LDOM it
+ * becomes HC_HALT: the guest stops (halt) or is booted again (reboot).
+ *
+ *	move.l	4(sp),d1		0 halt, 1 reboot
+ *	moveq	#HC_HALT,d0
+ *	trap	#15
+ *	bra.s	.
+ */
+#define HC_HALT		12
+
+static int
+patch_haltsys(u32 at)
+{
+	u16 *p = (u16 *)(uintptr_t)at;
+
+	if (!at || p[0] != 0x242f || p[1] != 0x0004)	/* move.l 4(sp),d2 */
+		return 0;
+	p[0] = 0x222f;
+	p[1] = 0x0004;
+	p[2] = 0x7000 | HC_HALT;
+	p[3] = 0x4e4f;
+	p[4] = 0x60fe;
+	return 1;
+}
+
+int
+amix_pv_patch(const struct amix_kernel *k)
+{
+	int n = patch_haltsys(k->haltsys);
+
+	if (!k->sf_fault || !k->u)
+		return n;
+	return n + patch_copy(k->lcopyin, 0x0000, HC_COPYIN, k) +
+	    patch_copy(k->lcopyout, 0x0001, HC_COPYOUT, k);
 }
 
 int

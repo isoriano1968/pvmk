@@ -35,7 +35,8 @@
 amix_enter:
 	move.l	4(%sp),%a2
 	move.w	#0x2700,%sr
-	move.w	#0x7fff,DMACON		/* our display goes away */
+	move.w	#0x7dff,DMACON		/* our display goes away; */
+	move.w	#0x8200,DMACON		/* DMAEN stays, as Kickstart has it */
 	move.w	#0x7fff,INTENA
 	move.w	#0x7fff,INTREQ
 

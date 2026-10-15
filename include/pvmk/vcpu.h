@@ -5,8 +5,7 @@
  * guest through its virtual VBR; TRAP #15 from guest supervisor mode is a
  * hypercall.
  *
- * Memory is identity mapped with the MMU off in M3 (no protection yet);
- * the shadow MMU arrives in M4.
+ * Memory: the guest's MMU is emulated with shadow tables (vmmu.h).
  */
 #ifndef PVMK_VCPU_H
 #define PVMK_VCPU_H
@@ -30,6 +29,9 @@
 #define HC_EXIT		7		/* D1 = exit code: back to the shell */
 #define HC_BREAK	8		/* enter the SORIX-LDOM shell */
 #define HC_WRITE	9		/* A0 = buffer, D1 = length */
+#define HC_COPYIN	10		/* A0 user -> A1 kernel, D1 bytes */
+#define HC_COPYOUT	11		/* A0 kernel -> A1 user, D1 bytes */
+#define HC_HALT		12		/* D1 = 0 halt, 1 reboot */
 #define HC_MAGIC	0x534f5258	/* 'SORX' */
 #define HC_ABI		1
 
@@ -58,6 +60,8 @@ struct vcpu {
 	u32 urp, srp40, tcr, itt0, itt1, dtt0, dtt1, pcr, buscr, mmusr40;
 
 	int exit_code;
+	int reboot;			/* stopped asking to be booted again */
+	int kbd_break;			/* stopped from the Amiga keyboard */
 	u32 stop_sig;			/* why it stopped (GDB signal number) */
 	int stop_swbreak;		/* ... at a GDB software breakpoint */
 	u32 n_emul, n_reflect, n_hcall, n_irq, n_idle;
@@ -80,6 +84,8 @@ void vcpu_exception(struct excregs *r);
 
 /* core/vcpu_s.S */
 void vcpu_enter(const struct vctx *c, u32 ssp) __attribute__((noreturn));
+void vcpu_enter_frame(const struct vctx *c, const void *frame, u32 size,
+    u32 ssp) __attribute__((noreturn));
 u32  fpu_save(void *buf);		/* FSAVE to buf; returns frame bytes */
 void fpu_restore(const void *buf);
 void cache_push_all(u32 model);

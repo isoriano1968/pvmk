@@ -23,6 +23,7 @@
 #include "pvmk/log.h"
 #include "pvmk/paula.h"
 #include "pvmk/vcpu.h"
+#include "pvmk/vmmu.h"
 
 struct vcpu guest;
 
@@ -30,6 +31,7 @@ struct vcpu guest;
 static u8 rxbuf[32];
 static u32 rxhead, rxlen;
 
+#define VEC_BUSERR	2
 #define VEC_ILLEGAL	4
 #define VEC_PRIV	8
 #define VEC_FORMAT	14
@@ -37,28 +39,116 @@ static u32 rxhead, rxlen;
 
 #define FAULT		(-1)
 
+#define SIGINT		2
+#define SIGTRAP		5
+#define SIGSEGV		11
+
+static void
+stop_guest(struct excregs *r, const char *why, u32 sig, int swbreak)
+    __attribute__((noreturn));
+
+/*
+ * Guest memory, as SORIX-LDOM touches it on the guest's behalf (decoding,
+ * frames, MOVES): guest virtual addresses, translated through the guest's
+ * tables in the current view (kernel view while virtual S = 1, or the
+ * view a MOVES function code selects).
+ */
+static struct excregs *cur_regs;	/* the guest's registers, for faults */
+
+/*
+ * A guest access that fails while an instruction is emulated: the rest of
+ * the instruction goes to a scratch buffer, its effects are undone and the
+ * guest gets a bus error for the instruction (restarted after its RTE).
+ */
+static int in_emul;			/* emulate() is running */
+static struct {
+	int faulted, write;
+	u32 va, size, fc;
+} afault;
+
+/* the first exceptions reflected to the guest (not interrupts) */
+#define NRLOG		8
+static struct { u32 vec, pc, vbr, handler; u16 sr; } rlog[NRLOG];
+static u32 nrlog;
+static int as_super = -1;		/* MOVES: view override */
+
+static uintptr_t
+gpa(u32 va, int write, u32 size)
+{
+	static u32 scratch[2];
+	int super = as_super >= 0 ? as_super : (guest.vsr & VSR_S) != 0;
+	u32 pa;
+	u16 sr;
+
+	if (afault.faulted)
+		return (uintptr_t)scratch;
+	sr = vmmu_translate(va, super, write, &pa);
+	if (sr && in_emul) {
+		afault.faulted = 1;
+		afault.va = va;
+		afault.write = write;
+		afault.size = size;
+		afault.fc = as_super >= 0 ? (write ? guest.dfc : guest.sfc) & 7 :
+		    super ? 5 : 1;
+		return (uintptr_t)scratch;
+	}
+	if (sr) {
+		kprintf("vcpu: guest %s at %08x (%s view) failed, MMUSR %04x\n",
+		    write ? "write" : "read", va, super ? "kernel" : "user", sr);
+		if (cur_regs)
+			stop_guest(cur_regs, "stopped (access fault)", SIGSEGV, 0);
+		pa = va;
+	}
+	return pa;
+}
+
+static u8
+rd8(u32 a)
+{
+	return *(volatile u8 *)gpa(a, 0, 1);
+}
+
+static void
+wr8(u32 a, u8 v)
+{
+	*(volatile u8 *)gpa(a, 1, 1) = v;
+}
+
+/* accesses that may cross a page (256 bytes, the smallest) go bytewise */
 static u16
 rd16(u32 a)
 {
-	return *(volatile u16 *)(uintptr_t)a;
+	if ((a & 0xff) == 0xff)
+		return (u16)(rd8(a) << 8 | rd8(a + 1));
+	return *(volatile u16 *)gpa(a, 0, 2);
 }
 
 static u32
 rd32(u32 a)
 {
-	return *(volatile u32 *)(uintptr_t)a;
+	if ((a & 0xff) > 0xfc)
+		return (u32)rd16(a) << 16 | rd16(a + 2);
+	return *(volatile u32 *)gpa(a, 0, 4);
 }
 
 static void
 wr16(u32 a, u16 v)
 {
-	*(volatile u16 *)(uintptr_t)a = v;
+	if ((a & 0xff) == 0xff) {
+		wr8(a, (u8)(v >> 8));
+		wr8(a + 1, (u8)v);
+	} else
+		*(volatile u16 *)gpa(a, 1, 2) = v;
 }
 
 static void
 wr32(u32 a, u32 v)
 {
-	*(volatile u32 *)(uintptr_t)a = v;
+	if ((a & 0xff) > 0xfc) {
+		wr16(a, (u16)(v >> 16));
+		wr16(a + 2, (u16)v);
+	} else
+		*(volatile u32 *)gpa(a, 1, 4) = v;
 }
 
 /* Full virtual SR: system byte from vsr, condition codes from the real SR. */
@@ -138,9 +228,61 @@ index_value(struct excregs *r, u16 ext)
 }
 
 /*
+ * 68020 full extension word: base displacement, optional index, optional
+ * memory indirection (pre- or post-indexed) and outer displacement.
+ * base: An, or the extension word's address (PC relative).
+ */
+static int
+ea_full(struct excregs *r, u32 base, u16 ext, u32 *pc, u32 *addr)
+{
+	u32 bd = 0, od = 0, xn = 0, is = ext & 7;
+
+	*pc += 2;
+	if (ext & 0x0008)
+		return FAULT;
+	if (ext & 0x0080)			/* BS: base suppressed */
+		base = 0;
+	if (!(ext & 0x0040))			/* IS = 0: index used */
+		xn = index_value(r, ext);
+	else if (is > 3)
+		return FAULT;
+	switch ((ext >> 4) & 3) {		/* base displacement size */
+	case 0:
+		return FAULT;
+	case 2:
+		bd = (u32)(s32)(s16)rd16(*pc);
+		*pc += 2;
+		break;
+	case 3:
+		bd = rd32(*pc);
+		*pc += 4;
+		break;
+	}
+	switch (is & 3) {			/* outer displacement size */
+	case 2:
+		od = (u32)(s32)(s16)rd16(*pc);
+		*pc += 2;
+		break;
+	case 3:
+		od = rd32(*pc);
+		*pc += 4;
+		break;
+	}
+	if (is == 0)				/* no memory indirection */
+		*addr = base + bd + xn;
+	else if (is == 4)
+		return FAULT;
+	else if (is < 4)			/* pre-indexed */
+		*addr = rd32(base + bd + xn) + od;
+	else					/* post-indexed */
+		*addr = rd32(base + bd) + xn + od;
+	return 0;
+}
+
+/*
  * Decode mode/reg; *pc points to the next extension word and is advanced.
  * Pre-decrement and post-increment are applied. Returns 0 or FAULT
- * (unsupported mode, e.g. full extension word).
+ * (unsupported mode).
  */
 static int
 ea_decode(struct excregs *r, u32 mode, u32 regno, u32 size, u32 *pc,
@@ -178,7 +320,7 @@ ea_decode(struct excregs *r, u32 mode, u32 regno, u32 size, u32 *pc,
 	case 6:
 		ext = rd16(*pc);
 		if (ext & 0x0100)
-			return FAULT;		/* full format: not needed here */
+			return ea_full(r, *an, ext, pc, &e->addr);
 		e->addr = *an + (u32)(s32)(s8)ext + index_value(r, ext);
 		*pc += 2;
 		return 0;
@@ -199,7 +341,7 @@ ea_decode(struct excregs *r, u32 mode, u32 regno, u32 size, u32 *pc,
 	case 3:
 		ext = rd16(*pc);
 		if (ext & 0x0100)
-			return FAULT;
+			return ea_full(r, *pc, ext, pc, &e->addr);
 		e->addr = *pc + (u32)(s32)(s8)ext + index_value(r, ext);
 		*pc += 2;
 		return 0;
@@ -229,7 +371,7 @@ ea_read(const struct ea *e, u32 size)
 		return rd32(e->addr);
 	if (size == 2)
 		return rd16(e->addr);
-	return *(volatile u8 *)(uintptr_t)e->addr;
+	return rd8(e->addr);
 }
 
 static void
@@ -247,7 +389,7 @@ ea_write(const struct ea *e, u32 size, u32 v)
 	else if (size == 2)
 		wr16(e->addr, (u16)v);
 	else
-		*(volatile u8 *)(uintptr_t)e->addr = (u8)v;
+		wr8(e->addr, (u8)v);
 }
 
 /* ------------------------------------------------------------------ */
@@ -269,10 +411,8 @@ frame_size(u32 fmt)
  * handler. ipl >= 0 also raises the virtual interrupt mask (interrupts).
  */
 static void
-reflect(struct excregs *r, u32 vec, int copy_frame, int ipl)
+reflect_frame(struct excregs *r, u32 vec, const u8 *frame, u32 fmt, int ipl)
 {
-	const u8 *frame = (const u8 *)&r->sr;
-	u32 fmt = copy_frame ? r->fmtvec >> 12 : 0;
 	u32 size = frame_size(fmt), sp, i;
 	u16 old = cur_vsr(r), nsr;
 
@@ -291,14 +431,91 @@ reflect(struct excregs *r, u32 vec, int copy_frame, int ipl)
 	wr32(sp + 2, r->pc);
 	wr16(sp + 6, (u16)(fmt << 12 | vec << 2));
 	r->a[7] = sp;
+	if (ipl < 0 && nrlog < NRLOG) {
+		rlog[nrlog].vec = vec;
+		rlog[nrlog].pc = rd32(sp + 2);
+		rlog[nrlog].sr = old;
+		rlog[nrlog].vbr = guest.vbr;
+		rlog[nrlog++].handler = rd32(guest.vbr + vec * 4);
+	}
 	r->pc = rd32(guest.vbr + vec * 4);
 	guest.n_reflect++;
+}
+
+/* copy_frame: the real frame's format and extra words, else format 0 */
+static void
+reflect(struct excregs *r, u32 vec, int copy_frame, int ipl)
+{
+	reflect_frame(r, vec, (const u8 *)&r->sr,
+	    copy_frame ? r->fmtvec >> 12 : 0, ipl);
+}
+
+/*
+ * Bus error for an emulated instruction whose access failed: a 68030
+ * short bus fault frame (format A) for a data fault, marked so that the
+ * guest's RTE restarts the instruction (emulated again) instead of handing
+ * the frame to the CPU.
+ */
+#define AF_MAGIC1	0x5058			/* internal register words */
+#define AF_MAGIC2	0x534f
+
+static void
+access_fault(struct excregs *r)
+{
+	u16 f[16];
+	u32 sz = afault.size == 1 ? 0x10 : afault.size == 2 ? 0x20 : 0;
+
+	memset(f, 0, sizeof(f));
+	f[4] = AF_MAGIC1;
+	f[5] = (u16)(0x0100 | (afault.write ? 0 : 0x0040) | sz | afault.fc);
+	f[6] = rd16(r->pc);			/* stage C: the opcode */
+	f[8] = (u16)(afault.va >> 16);
+	f[9] = (u16)afault.va;
+	f[10] = AF_MAGIC2;
+	afault.faulted = 0;
+	reflect_frame(r, VEC_BUSERR, (const u8 *)f, 0xa, -1);
 }
 
 /* ------------------------------------------------------------------ */
 /* Emulation                                                           */
 
 static void poll_serial(struct excregs *r);
+
+/*
+ * Break-in from the Amiga keyboard: Ctrl + Left Amiga + Help. The keyboard
+ * belongs to the guest; on each level 2 interrupt SORIX-LDOM only looks
+ * at CIA-A's serial data register (reading it clears nothing), so the
+ * guest still gets every key.
+ */
+#define CIAA_SDR	0xbfec01
+#define KEY_CTRL	0x63
+#define KEY_LAMIGA	0x66
+#define KEY_HELP	0x5f
+
+static void
+kbd_snoop(struct excregs *r)
+{
+	static u8 last;
+	static int ctrl, lamiga;
+	u8 x = (u8)~*(volatile u8 *)CIAA_SDR, code;
+	int up;
+
+	if (x == last)
+		return;				/* nothing new shifted in */
+	last = x;
+	code = (u8)(x >> 1 | x << 7);
+	up = code & 0x80;
+	code &= 0x7f;
+	if (code == KEY_CTRL)
+		ctrl = !up;
+	else if (code == KEY_LAMIGA)
+		lamiga = !up;
+	else if (code == KEY_HELP && !up && ctrl && lamiga) {
+		ctrl = lamiga = 0;
+		guest.kbd_break = 1;
+		stop_guest(r, "stopped (Ctrl-Amiga-Help)", SIGINT, 0);
+	}
+}
 
 /*
  * The guest waits for an interrupt (STOP, HC_IDLE): stop the real CPU at
@@ -327,6 +544,8 @@ idle(struct excregs *r)
 	}
 	time_now(&s1, &ms1);
 	guest.idle_ms += (s1 - s0) * 1000 + ms1 - ms0;
+	if (vec == 26)
+		kbd_snoop(r);
 	if (vec >= 25 && vec <= 31) {
 		guest.n_irq++;
 		reflect(r, vec, 0, (int)(vec - 24));
@@ -412,6 +631,7 @@ pmmu030(struct excregs *r, u16 op, u32 *pc)
 			p[0] = rd32(e.addr);
 			if (size == 8)
 				p[1] = rd32(e.addr + 4);
+			vmmu_flush();		/* new tables or geometry */
 		}
 		return 0;
 	case 0x6000:				/* PMOVE MMUSR */
@@ -423,15 +643,30 @@ pmmu030(struct excregs *r, u16 op, u32 *pc)
 			guest.mmusr = (u16)ea_read(&e, 2);
 		return 0;
 	case 0x2000:				/* PFLUSH / PLOAD */
-		if ((ext & 0x1c00) == 0x1800 &&	/* PFLUSH fc,mask,<ea> */
+		if (((ext & 0x1c00) == 0x1800 ||	/* PFLUSH fc,mask,<ea> */
+		    (ext & 0x1c00) == 0x0000) &&	/* PLOAD fc,<ea> */
 		    ea_decode(r, mode, regno, 4, pc, &e))
 			return FAULT;
-		return 0;			/* nothing cached yet (M4) */
-	case 0x8000:				/* PTEST */
-		if (ea_decode(r, mode, regno, 4, pc, &e))
-			return FAULT;
-		guest.mmusr = 0;
+		if (ext & 0x1c00)
+			vmmu_flush();		/* PFLUSH: all of it */
 		return 0;
+	case 0x8000: {				/* PTEST */
+		u32 fc, desc;
+
+		if (ea_decode(r, mode, regno, 4, pc, &e) || e.is_reg ||
+		    e.is_imm)
+			return FAULT;
+		switch (ext & 0x18) {
+		case 0x00: fc = ext & 1 ? guest.dfc : guest.sfc; break;
+		case 0x08: fc = r->d[ext & 7]; break;
+		default:   fc = ext & 7; break;	/* immediate */
+		}
+		guest.mmusr = vmmu_ptest(e.addr, fc & 7, !(ext & 0x0200),
+		    (ext >> 10) & 7, &desc);
+		if (ext & 0x0100)
+			r->a[(ext >> 5) & 7] = desc;
+		return 0;
+	}
 	}
 	return FAULT;
 }
@@ -449,6 +684,8 @@ moves(struct excregs *r, u16 op, u32 *pc)
 	if (ea_decode(r, (op >> 3) & 7, op & 7, size, pc, &e) || e.is_reg ||
 	    e.is_imm)
 		return FAULT;
+	/* the access goes to the address space DFC (write) or SFC selects */
+	as_super = ((ext & 0x0800 ? guest.dfc : guest.sfc) & 4) != 0;
 	if (ext & 0x0800)
 		ea_write(&e, size, *rn);
 	else if (ext & 0x8000)
@@ -458,27 +695,49 @@ moves(struct excregs *r, u16 op, u32 *pc)
 	else
 		ea_write(&(struct ea){ .is_reg = 1, .reg = rn }, size,
 		    ea_read(&e, size));
+	as_super = -1;
 	return 0;
 }
 
+/* guest exceptions so far: no guest instruction ran if it is unchanged */
+static u32
+guest_events(void)
+{
+	return guest.n_emul + guest.n_reflect + guest.n_hcall + guest.n_irq;
+}
+
+/*
+ * FSAVE/FRESTORE for the guest, executed on the real FPU.
+ *
+ * An FSAVE right after a null-frame FRESTORE saves a null frame on a
+ * 68881/68882 (the FPU is in its reset state); FS-UAE's 68882 saves an
+ * idle frame instead, which overruns AMIX's 8-byte reset_fsave in
+ * chk_fpu. The documented result is produced when no guest instruction
+ * can have run in between.
+ */
 static int
 fsave_frestore(struct excregs *r, u16 op, u32 *pc)
 {
 	static u8 buf[256] __attribute__((aligned(4)));
+	static u32 null_pc, null_events;
 	u32 mode = (op >> 3) & 7, regno = op & 7, n, i;
 	struct ea e;
 
 	if (cpuinfo.fpu < 0 && cpuinfo.model != 60)
 		return FAULT;
 	if (!(op & 0x0040)) {			/* FSAVE <ea>: -(An) or control */
-		n = fpu_save(buf);
+		if (r->pc == null_pc && guest_events() == null_events + 1) {
+			memset(buf, 0, 4);
+			n = 4;			/* still in the reset state */
+		} else
+			n = fpu_save(buf);
 		if (mode == 4) {
 			r->a[regno] -= n;
 			e.addr = r->a[regno];
 		} else if (ea_decode(r, mode, regno, 4, pc, &e) || e.is_reg)
 			return FAULT;
 		for (i = 0; i < n; i++)
-			*(volatile u8 *)(uintptr_t)(e.addr + i) = buf[i];
+			wr8(e.addr + i, buf[i]);
 		return 0;
 	}
 	/* FRESTORE <ea>: (An)+ or control */
@@ -486,28 +745,63 @@ fsave_frestore(struct excregs *r, u16 op, u32 *pc)
 		e.addr = r->a[regno];
 	else if (ea_decode(r, mode, regno, 4, pc, &e) || e.is_reg)
 		return FAULT;
-	n = (u32)*(volatile u8 *)(uintptr_t)(e.addr + 1) + 4;
+	n = (u32)rd8(e.addr + 1) + 4;
 	if (n > sizeof(buf))
 		return FAULT;
 	for (i = 0; i < n; i++)
-		buf[i] = *(volatile u8 *)(uintptr_t)(e.addr + i);
+		buf[i] = rd8(e.addr + i);
+	if (afault.faulted)
+		return 0;
 	fpu_restore(buf);
 	if (mode == 3)
 		r->a[regno] += n;
+	null_pc = buf[0] == 0 ? *pc : 1;	/* null frame: FPU reset */
+	null_events = guest_events();
 	return 0;
 }
 
-/* RTE from virtual supervisor mode: pop a format 0/2 frame. */
+static void save_ctx(const struct excregs *r);
+
+/*
+ * RTE from virtual supervisor mode: pop a format 0/2 frame; a 68030 bus
+ * error frame (A, B) goes back to the CPU itself, which continues or
+ * reruns the faulted access.
+ */
 static int
 rte(struct excregs *r)
 {
-	u32 sp = r->a[7];
+	static u16 fr[46];
+	u32 sp = r->a[7], i;
 	u16 sr = rd16(sp), fv = rd16(sp + 6);
-	u32 pc = rd32(sp + 2), size = frame_size(fv >> 12);
+	u32 pc = rd32(sp + 2), fmt = fv >> 12, size = frame_size(fmt);
 
-	if ((fv >> 12) != 0 && (fv >> 12) != 2) {
+	if (fmt == 0xa && rd16(sp + 8) == AF_MAGIC1 &&
+	    rd16(sp + 0x14) == AF_MAGIC2) {
+		r->a[7] = sp + size;		/* ours: restart the instruction */
+		set_vsr(r, sr);
+		r->pc = pc;
+		return 0;
+	}
+	if (fmt == 0xa || fmt == 0xb) {
+		if (cpuinfo.model != 30)
+			return FAULT;
+		for (i = 0; i < size; i += 2)
+			fr[i / 2] = rd16(sp + i);
+		r->a[7] = sp + size;
+		set_vsr(r, sr);
+		r->pc = pc;
+		if (afault.faulted)
+			return 0;		/* frame not readable */
+		fr[0] = real_sr(r);
+		fr[5] &= (u16)~4;		/* the rerun is a user cycle */
+		save_ctx(r);
+		guest.n_emul++;
+		vmmu_activate();
+		vcpu_enter_frame(&guest.ctx, fr, size, sstack_top());
+	}
+	if (fmt != 0 && fmt != 2) {
 		kprintf("vcpu: RTE with frame format %x not supported yet\n",
-		    fv >> 12);
+		    fmt);
 		return FAULT;
 	}
 	r->a[7] = sp + size;
@@ -562,7 +856,11 @@ emulate(struct excregs *r)
 		guest.n_emul++;
 		idle(r);
 		return 0;
-	} else if (op == 0x4e70) {			/* RESET: ignored */
+	} else if (op == 0x4e70) {		/* RESET: the guest reboots */
+		guest.reboot = 1;
+		guest.active = 0;
+		r->pc = pc;
+		stop_guest(r, "reset (reboot)", 0, 0);
 	} else if ((op & 0xff00) == 0x0e00) {		/* MOVES */
 		if (moves(r, op, &pc))
 			return FAULT;
@@ -575,7 +873,7 @@ emulate(struct excregs *r)
 	} else if ((op & 0xff00) == 0xf400 && cpuinfo.model >= 40) {
 		cache_push_all(cpuinfo.model);		/* CINV / CPUSH */
 	} else if ((op & 0xffe0) == 0xf500 && cpuinfo.model >= 40) {
-		/* PFLUSH (An), PFLUSHN, PFLUSHA: nothing cached yet (M4) */
+		vmmu_flush();		/* PFLUSH (An), PFLUSHN, PFLUSHA */
 	} else if ((op & 0xffd8) == 0xf548 && cpuinfo.model == 40) {
 		guest.mmusr40 = 0;			/* PTEST */
 	} else if ((op & 0xffb8) == 0xf588 && cpuinfo.model == 60) {
@@ -591,19 +889,8 @@ emulate(struct excregs *r)
 /* ------------------------------------------------------------------ */
 /* Hypercalls and stopping                                             */
 
-#define SIGINT		2
-#define SIGTRAP		5
-
 static void
-stop_guest(struct excregs *r, const char *why, u32 sig, int swbreak)
-    __attribute__((noreturn));
-
-/*
- * Stop the guest and go to the shell (or back to GDB if it is attached);
- * its registers are kept for resume.
- */
-static void
-stop_guest(struct excregs *r, const char *why, u32 sig, int swbreak)
+save_ctx(const struct excregs *r)
 {
 	u32 i;
 
@@ -613,6 +900,16 @@ stop_guest(struct excregs *r, const char *why, u32 sig, int swbreak)
 	}
 	guest.ctx.sr = real_sr(r);
 	guest.ctx.pc = r->pc;
+}
+
+/*
+ * Stop the guest and go to the shell (or back to GDB if it is attached);
+ * its registers are kept for resume.
+ */
+static void
+stop_guest(struct excregs *r, const char *why, u32 sig, int swbreak)
+{
+	save_ctx(r);
 	guest.running = 0;
 	guest.stop_sig = sig;
 	guest.stop_swbreak = swbreak;
@@ -622,6 +919,51 @@ stop_guest(struct excregs *r, const char *why, u32 sig, int swbreak)
 	kprintf("vcpu: %s %s at PC %08x, SR %04x\n", guest.name, why, r->pc,
 	    cur_vsr(r));
 	restart(sstack_top(), shell_main);
+}
+
+/*
+ * HC_COPYIN/HC_COPYOUT: copy between the guest's user and kernel views,
+ * up to a page at a time. A0, A1, D1 advance as it goes; an address the
+ * guest's tables refuse gives it a bus error at the TRAP (restarted after
+ * its RTE, so the copy resumes once the page is in).
+ */
+static void
+hc_copy(struct excregs *r, int out)
+{
+	u32 src = r->a[0], dst = r->a[1], n = r->d[1], sp, dp, chunk, pg;
+	int bad;
+
+	pg = guest.tc & 0x80000000 ? 1u << ((guest.tc >> 20) & 15) : 4096;
+	while (n) {
+		bad = 0;
+		if (vmmu_translate(src, out, 0, &sp))
+			bad = 1;
+		else if (vmmu_translate(dst, !out, 1, &dp))
+			bad = 2;
+		if (bad) {
+			afault.va = bad == 1 ? src : dst;
+			afault.write = bad == 2;
+			afault.size = 1;
+			afault.fc = (bad == 1) == !out ? 1 : 5;
+			r->pc -= 2;			/* the TRAP, to restart */
+			access_fault(r);
+			return;
+		}
+		chunk = n;
+		if (chunk > pg - (src & (pg - 1)))
+			chunk = pg - (src & (pg - 1));
+		if (chunk > pg - (dst & (pg - 1)))
+			chunk = pg - (dst & (pg - 1));
+		memcpy((void *)(uintptr_t)dp, (const void *)(uintptr_t)sp, chunk);
+		src += chunk;
+		dst += chunk;
+		n -= chunk;
+		r->a[0] = src;
+		r->a[1] = dst;
+		r->d[1] = n;
+	}
+	guest.sfc = guest.dfc = 1;		/* as the MOVES loops left them */
+	r->d[0] = 0;
 }
 
 static void
@@ -662,8 +1004,16 @@ hypercall(struct excregs *r)
 			gdb_console((const u8 *)(uintptr_t)r->a[0], r->d[1]);
 		else
 			for (i = 0; i < r->d[1]; i++)
-				con_putc(*(volatile u8 *)(uintptr_t)(r->a[0] + i));
+				con_putc(rd8(r->a[0] + i));
 		break;
+	case HC_COPYIN:
+	case HC_COPYOUT:
+		hc_copy(r, r->d[0] == HC_COPYOUT);
+		break;
+	case HC_HALT:
+		guest.reboot = r->d[1] != 0;
+		guest.active = 0;
+		stop_guest(r, guest.reboot ? "rebooting" : "halted", 0, 0);
 	case HC_EXIT:
 		guest.exit_code = (int)r->d[1];
 		guest.active = 0;
@@ -699,8 +1049,26 @@ void
 vcpu_exception(struct excregs *r)
 {
 	u32 vec = (r->fmtvec & 0xfff) >> 2;
+	int k;
 
+	cur_regs = r;
+	in_emul = 0;			/* an emulation that stopped the guest */
+	afault.faulted = 0;
 	poll_serial(r);
+	{
+		u32 o, n;
+
+		if (vmmu_watch_check(&o, &n)) {
+			kprintf("vcpu: watched long changed %08x -> %08x without a "
+			    "guest write (SDMAC ACR %08x, WTC %08x)\n", o, n,
+			    *(volatile u32 *)0xdd000c, *(volatile u32 *)0xdd0004);
+			stop_guest(r, "stopped (watch)", SIGTRAP, 0);
+		}
+	}
+	if (vec == 9 && vmmu_watch_step()) {		/* watchpoint step done */
+		r->sr = real_sr(r);
+		return;
+	}
 	if (vec == 9 && gdb_step)			/* GDB single-step */
 		stop_guest(r, "stepped", SIGTRAP, 0);
 	if (vec == VEC_ILLEGAL && rd16(r->pc) == 0x4afc &&
@@ -711,18 +1079,61 @@ vcpu_exception(struct excregs *r)
 			r->sr = real_sr(r);		/* serial receive: ours */
 			return;
 		}
+		if (vec == 26)
+			kbd_snoop(r);
 		guest.n_irq++;
 		reflect(r, vec, 0, (int)(vec - 24));
 	} else if (vec == VEC_PRIV && (guest.vsr & VSR_S)) {
-		if (emulate(r))
+		struct excregs save = *r;
+		u32 vsr = guest.vsr, usp = guest.usp, isp = guest.isp;
+		u32 msp = guest.msp;
+
+		in_emul = 1;
+		k = emulate(r);
+		in_emul = 0;
+		as_super = -1;
+		if (afault.faulted) {		/* undo, then bus error */
+			*r = save;
+			guest.vsr = (u16)vsr;
+			guest.usp = usp;
+			guest.isp = isp;
+			guest.msp = msp;
+			access_fault(r);
+		} else if (k)
 			reflect(r, VEC_ILLEGAL, 0, -1);
 	} else if (vec == VEC_TRAP15 && (guest.vsr & VSR_S)) {
 		hypercall(r);				/* PC is past the TRAP */
+	} else if (vec == VEC_BUSERR && (k = vmmu_fault(r)) >= 0) {
+		r->sr = real_sr(r);			/* shadow miss: rerun */
+		if (k)
+			r->sr |= VSR_T1;		/* watchpoint: one step */
+		return;
+	} else if (vec == VEC_BUSERR && ((r->fmtvec >> 12) == 0xa ||
+	    (r->fmtvec >> 12) == 0xb)) {
+		/*
+		 * The guest sees the function code of its own mode: the
+		 * CPU ran it in user mode, its kernel runs with virtual S.
+		 */
+		if (guest.vsr & VSR_S)
+			*((u16 *)&r->sr + 5) |= 4;	/* SSW FC: supervisor */
+		reflect(r, vec, 1, -1);
+		/*
+		 * Leave through a fresh frame: an RTE of the real bus error
+		 * frame would make the CPU rerun or continue the faulted
+		 * access. The guest's RTE of its copy does that later.
+		 */
+		guest.ctx.sr = 0;
+		save_ctx(r);
+		if (gdb_step)
+			stop_guest(r, "stepped", SIGTRAP, 0);
+		vmmu_activate();
+		vcpu_enter(&guest.ctx, sstack_top());
 	} else
 		reflect(r, vec, 1, -1);
 	if (gdb_step)		/* an emulated or reflected instruction: one step */
 		stop_guest(r, "stepped", SIGTRAP, 0);
 	r->sr = real_sr(r);
+	vmmu_activate();			/* view of the new virtual S */
 }
 
 /* ------------------------------------------------------------------ */
@@ -732,7 +1143,8 @@ void
 vcpu_prepare(const char *name, u32 pc, u32 ssp, u32 d0)
 {
 	memset(&guest, 0, sizeof(guest));
-	rxhead = rxlen = 0;
+	rxhead = rxlen = nrlog = 0;
+	vmmu_reset();
 	guest.ctx.d[0] = d0;
 	guest.name = name;
 	guest.active = 1;
@@ -781,6 +1193,8 @@ vcpu_resume(void)
 		guest.ctx.sr |= VSR_T1;			/* trace */
 	con_interactive(0);
 	REG16(CUSTOM_INTENA) = 0xc800;		/* master + serial receive */
+	cur_regs = NULL;
+	vmmu_activate();
 	vcpu_enter(&guest.ctx, sstack_top());
 }
 
@@ -811,4 +1225,9 @@ vcpu_show(void)
 	    guest.n_emul, guest.n_reflect, guest.n_hcall, guest.n_irq);
 	kprintf("  idle: %u wake-ups, %u ms waiting in STOP\n", guest.n_idle,
 	    guest.idle_ms);
+	for (i = 0; i < (int)nrlog; i++)
+		kprintf("  reflected: %s (vector %u) at PC %08x, SR %04x -> "
+		    "VBR %08x handler %08x\n", exc_name(rlog[i].vec), rlog[i].vec,
+		    rlog[i].pc, rlog[i].sr, rlog[i].vbr, rlog[i].handler);
+	vmmu_show();
 }
