@@ -34,10 +34,47 @@
 /* TT0 for SORIX-LDOM: all addresses, supervisor FCs (4-7), read and write */
 #define SH_TT0		0x00ff8143
 
-#define POOL_SIZE	(48 * 1024)
+#define POOL_SIZE	(64 * 1024)
 
 static u8 pool[POOL_SIZE] __attribute__((aligned(16)));
 static u32 pool_used;
+
+/*
+ * Revalidation instead of rebuilding (guest PFLUSH). Every shadow page
+ * table (L3) carries what its entries were made from: the upper guest
+ * descriptors (the same for all its entries, else it is not kept) and,
+ * per entry, the guest page descriptor and its value. Entries go in
+ * without U, so the CPU marks those it uses. At a guest PFLUSH the L3
+ * tables are checked: entries used since the last PFLUSH whose guest
+ * descriptors are unchanged stay (U cleared again), the others go, and an
+ * L3 left empty is recycled. Cheap compares for the working set instead
+ * of a bus error per page after every flush.
+ */
+#define NL3		192
+#define MAXPATH		4		/* guest descriptors per walk kept */
+struct l3meta {
+	u32 *l3;
+	u32 *l2e;			/* the L2 entry pointing to it */
+	u8 view, uniform, nup, pad;
+	u32 up_a[MAXPATH - 1], up_v[MAXPATH - 1];
+	u32 pd_a[32], pd_v[32];		/* 0: made without a guest table */
+};
+#define L3SIZE		((SH_L3 * 4 + sizeof(struct l3meta) + 15) & ~15u)
+static struct l3meta *l3list[NL3];
+static u32 nl3;
+static u32 *l3free;			/* recycled L3 blocks */
+static u32 n_kept, n_dropped, n_pflush;
+static void l3_release(u32 i);
+
+static u32
+dsig(u32 a)				/* a guest descriptor's value */
+{
+	u32 v = *(volatile u32 *)(uintptr_t)(a & ~3u);
+
+	if (a & 1)			/* long: both words */
+		v ^= *(volatile u32 *)(uintptr_t)((a & ~3u) + 4) * 0x9e3779b1u;
+	return v;
+}
 
 /* software TLB for SORIX-LDOM's own accesses to guest memory */
 #define NTLB		16
@@ -126,6 +163,8 @@ shadow_clear(void)
 	int i;
 
 	pool_used = 0;
+	nl3 = 0;
+	l3free = NULL;
 	for (i = 0; i < 2; i++) {
 		views[i].l1 = pool_alloc(SH_L1 * 4);
 		views[i].crp[0] = 0x7fff0002;	/* upper limit 7fff, short */
@@ -150,6 +189,7 @@ vmmu_reset(void)
 {
 	enabled = cpuinfo.model == 30 && cpuinfo.mmu_ok;
 	n_fill = n_wp = n_guestfault = n_flush = nflog = n_flush_user = 0;
+	n_pflush = n_kept = n_dropped = 0;
 	n_reset++;
 	shadow_clear();
 	if (loaded >= 0)
@@ -181,6 +221,11 @@ vmmu_flush_user(void)
 		return;
 	}
 	n_flush_user++;
+	for (u32 i = 0; i < nl3; )		/* recycle the user view's L3s */
+		if (l3list[i]->view == 0)
+			l3_release(i);
+		else
+			i++;
 	if (!(v->l1 = pool_alloc(SH_L1 * 4))) {
 		vmmu_flush();			/* pool full: start over */
 		return;
@@ -189,6 +234,53 @@ vmmu_flush_user(void)
 	tlb_clear(v);
 	if (loaded >= 0)
 		mmu030_root(views[loaded].crp);
+}
+
+/*
+ * Guest PFLUSH: keep what is still right (see struct l3meta). Entries the
+ * CPU used since the last PFLUSH (U set by its table walk) are checked
+ * against the guest's descriptors; everything else goes.
+ */
+void
+vmmu_pflush(void)
+{
+	u32 i = 0, k, j, pd, any;
+	struct l3meta *m;
+
+	n_pflush++;
+	while (i < nl3) {
+		m = l3list[i];
+		any = 0;
+		if (m->uniform == 1) {
+			for (j = 0; j < m->nup; j++)
+				if (dsig(m->up_a[j]) != m->up_v[j])
+					break;
+			if (j == m->nup)
+				for (k = 0; k < SH_L3; k++) {
+					pd = m->l3[k];
+					if (!(pd & D_DT))
+						continue;
+					if ((pd & D_U) && (!m->pd_a[k] ||
+					    dsig(m->pd_a[k]) == m->pd_v[k])) {
+						m->l3[k] = pd & ~(u32)D_U;
+						any++;
+					} else {
+						m->l3[k] = 0;
+						n_dropped++;
+					}
+				}
+		}
+		if (!any) {
+			l3_release(i);
+			continue;
+		}
+		n_kept += any;
+		i++;
+	}
+	tlb_clear(&views[0]);
+	tlb_clear(&views[1]);
+	if (loaded >= 0)
+		mmu030_flush();
 }
 
 void
@@ -222,6 +314,8 @@ struct walk {
 	u32 pdesc;			/* page descriptor, 0 for TT/no MMU */
 	int wp, ci, mod;
 	u32 levels;
+	/* the descriptors used, root first (address | 1 if long) */
+	u32 npath, path[MAXPATH];
 };
 
 /* 68030 TT0/TT1 match for a data access */
@@ -255,6 +349,7 @@ walk(u32 va, u32 fc, int write, int update, u32 maxlev, struct walk *w)
 
 	w->wp = w->ci = w->mod = 0;
 	w->pdesc = w->desc = 0;
+	w->npath = 0;
 	w->levels = 0;
 	w->pa = va;
 	if (tt_match(guest.tt0, va, fc, write) ||
@@ -300,6 +395,8 @@ walk(u32 va, u32 fc, int write, int update, u32 maxlev, struct walk *w)
 		ea = ((cur_long ? d1 : d0) & ~0xf) + idx * (dt == DT_LONG ? 8 : 4);
 		nd0 = prd(ea);
 		nd1 = dt == DT_LONG ? prd(ea + 4) : 0;
+		if (w->npath < MAXPATH)
+			w->path[w->npath++] = ea | (dt == DT_LONG);
 		if (walk_trace)
 			kprintf("  level %u: index %x, %s descriptor at %08x: %08x"
 			    " %08x\n", w->levels + 1, idx, dt == DT_LONG ? "long" :
@@ -329,6 +426,8 @@ walk(u32 va, u32 fc, int write, int update, u32 maxlev, struct walk *w)
 		d0 = prd(ea);
 		d1 = cur_long ? prd(ea + 4) : 0;
 		w->desc = ea;
+		if (w->npath < MAXPATH)
+			w->path[w->npath++] = ea | (u32)cur_long;
 		w->levels++;
 		if (walk_trace)
 			kprintf("  indirect: page descriptor at %08x: %08x %08x\n",
@@ -411,11 +510,50 @@ vmmu_ptest(u32 va, u32 fc, int write, u32 level, u32 *desc)
 /* ------------------------------------------------------------------ */
 /* Shadow fill                                                         */
 
-/* Install the mapping for one shadow page. 0 or -1 (pool exhausted). */
-static int
-shadow_set(struct view *v, u32 va, u32 pd)
+/* a new L3 shadow table with its record */
+static u32 *
+l3_alloc(int vi, u32 *l2e)
 {
-	u32 *l2, *l3, i1 = va >> 24, i2 = (va >> 16) & 0xff;
+	struct l3meta *m;
+	u32 *l3;
+
+	if (nl3 >= NL3)
+		return NULL;
+	if (l3free) {
+		l3 = l3free;
+		l3free = (u32 *)(uintptr_t)l3[0];
+		memset(l3, 0, L3SIZE);
+	} else if (!(l3 = pool_alloc(L3SIZE)))
+		return NULL;
+	m = (struct l3meta *)(l3 + SH_L3);
+	m->l3 = l3;
+	m->l2e = l2e;
+	m->view = (u8)vi;
+	m->uniform = 2;			/* 2: no entry yet */
+	l3list[nl3++] = m;
+	return l3;
+}
+
+static void
+l3_release(u32 i)			/* list index i: unlink and recycle */
+{
+	struct l3meta *m = l3list[i];
+
+	*m->l2e = 0;
+	m->l3[0] = (u32)(uintptr_t)l3free;
+	l3free = m->l3;
+	l3list[i] = l3list[--nl3];
+}
+
+/*
+ * Install the mapping for one shadow page, made from walk w. 0 or -1
+ * (pool exhausted).
+ */
+static int
+shadow_set(struct view *v, u32 va, u32 pd, const struct walk *w)
+{
+	u32 *l2, *l3, i1 = va >> 24, i2 = (va >> 16) & 0xff, k, j, nup;
+	struct l3meta *m;
 
 	if (!(v->l1[i1] & D_DT)) {
 		if (!(l2 = pool_alloc(SH_L2 * 4)))
@@ -424,12 +562,35 @@ shadow_set(struct view *v, u32 va, u32 pd)
 	}
 	l2 = (u32 *)(uintptr_t)(v->l1[i1] & ~0xf);
 	if (!(l2[i2] & D_DT)) {
-		if (!(l3 = pool_alloc(SH_L3 * 4)))
+		if (!(l3 = l3_alloc(v == &views[1], &l2[i2])))
 			return -1;
 		l2[i2] = (u32)(uintptr_t)l3 | DT_SHORT;
 	}
 	l3 = (u32 *)(uintptr_t)(l2[i2] & ~0xf);
-	l3[(va >> 11) & 31] = pd;
+	k = (va >> 11) & 31;
+	l3[k] = pd;
+	if (!w)
+		return 0;			/* same entry, new protection */
+	m = (struct l3meta *)(l3 + SH_L3);
+	nup = w->npath ? w->npath - 1 : 0;
+	if (m->uniform == 2) {			/* first entry: its path */
+		m->uniform = 1;
+		m->nup = (u8)nup;
+		for (j = 0; j < nup; j++) {
+			m->up_a[j] = w->path[j];
+			m->up_v[j] = dsig(w->path[j]);
+		}
+	} else if (m->nup != nup)
+		m->uniform = 0;
+	else
+		for (j = 0; j < nup; j++)
+			if (m->up_a[j] != w->path[j])
+				m->uniform = 0;
+	if (w->npath) {
+		m->pd_a[k] = w->path[w->npath - 1];
+		m->pd_v[k] = dsig(m->pd_a[k]);
+	} else
+		m->pd_a[k] = 0;
 	return 0;
 }
 
@@ -476,7 +637,7 @@ shadow_fill(u32 va, int write)
 		return -1;
 	}
 	/* write-protect until the guest's M bit is set, so it gets set */
-	pd = ((w.pa & ~(SH_PAGE - 1)) | D_U | D_M | DT_PAGE) |
+	pd = ((w.pa & ~(SH_PAGE - 1)) | D_M | DT_PAGE) |
 	    (w.ci ? D_CI : 0) | (w.wp || !w.mod ? D_WP : 0);
 	if (watch_va && !((w.pa ^ watch_va) & ~(SH_PAGE - 1))) {
 		if (!watch_open)
@@ -484,10 +645,10 @@ shadow_fill(u32 va, int write)
 		else
 			pd &= ~(u32)D_WP;
 	}
-	if (shadow_set(v, va, pd)) {
+	if (shadow_set(v, va, pd, &w)) {
 		shadow_clear();			/* pool full: start over */
 		v = &views[super];
-		if (shadow_set(v, va, pd))
+		if (shadow_set(v, va, pd, &w))
 			return -1;
 	}
 	if (old & D_DT)
@@ -578,7 +739,7 @@ vmmu_watch_step(void)
 	v = &views[(guest.vsr & VSR_S) != 0];
 	pd = shadow_get(v, watch_open);
 	if (pd & D_DT)
-		shadow_set(v, watch_open, pd | D_WP);
+		shadow_set(v, watch_open, pd | D_WP, NULL);
 	watch_open = 0;
 	if (loaded >= 0)
 		mmu030_root(views[loaded].crp);
@@ -651,6 +812,8 @@ vmmu_show(void)
 	kprintf("  shadow MMU: %u fills, %u M-bit upgrades, %u guest faults, "
 	    "%u flushes (+%u user view only), pool %u/%u bytes\n", n_fill,
 	    n_wp, n_guestfault, n_flush, n_flush_user, pool_used, POOL_SIZE);
+	kprintf("  shadow MMU: %u PFLUSHes revalidated: %u entries kept, %u "
+	    "dropped; %u L3 tables live\n", n_pflush, n_kept, n_dropped, nl3);
 	if (watch_va)
 		kprintf("  watch %08x: %u writes to its page\n", watch_va, nwatch);
 	for (u32 i = 0; i < nwlog; i++)

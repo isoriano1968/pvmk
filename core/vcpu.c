@@ -679,7 +679,7 @@ pmmu030(struct excregs *r, u16 op, u32 *pc)
 		 */
 		if ((ext & 0x1c00) && !(r->pc == crp_next &&
 		    guest_events() == crp_events + 1))
-			vmmu_flush();
+			vmmu_pflush();
 		crp_next = 1;
 		return 0;
 	case 0x8000: {				/* PTEST */
@@ -1011,7 +1011,7 @@ emulate(struct excregs *r)
 	} else if ((op & 0xff00) == 0xf400 && cpuinfo.model >= 40) {
 		cache_push_all(cpuinfo.model);		/* CINV / CPUSH */
 	} else if ((op & 0xffe0) == 0xf500 && cpuinfo.model >= 40) {
-		vmmu_flush();		/* PFLUSH (An), PFLUSHN, PFLUSHA */
+		vmmu_pflush();		/* PFLUSH (An), PFLUSHN, PFLUSHA */
 	} else if ((op & 0xffd8) == 0xf548 && cpuinfo.model == 40) {
 		guest.mmusr40 = 0;			/* PTEST */
 	} else if ((op & 0xffb8) == 0xf588 && cpuinfo.model == 60) {

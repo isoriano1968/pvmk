@@ -773,7 +773,15 @@ AMIX's login screen (fresh copy of a clean disk): 148 s before M6.
 - a PMOVE to CRP (AMIX's hat_asload: pmove crp; pflusha) rebuilds only
   the user view; the kernel view is kept;
 - the CPU root is reloaded whenever the shadow pool is cleared (bug).
-Result: login after 112 s. The remaining cost is shadow refills (about
+- PFLUSH revalidates instead of rebuilding: each shadow page table
+  records the guest descriptors it was made from (the upper ones, the
+  same for all its entries, and per entry the page descriptor and its
+  value); entries go in without U, so the 68030's table walk marks those
+  in use; at a PFLUSH, entries used since the last one whose descriptors
+  are unchanged stay, the rest go, empty tables are recycled. 1.4
+  million entries kept over a boot; refills 1.5 million -> 0.83 million.
+Result: login after 92 s (148 s before M6). Before revalidation: 112 s;
+the remaining cost was shadow refills (about
 1.5 million per boot) after AMIX's ~30,000 full PFLUSHAs (flushmmu after
 page table changes, resume after the u-area switch). Tried and dropped:
 prefilling 64 KB around a miss (slower: most refills touch one page) and
