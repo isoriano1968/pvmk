@@ -88,3 +88,29 @@ idle_stop:
 	.balign	4
 idle_active:	.space	4
 idle_vec:	.space	4
+
+/*
+ * int safe_copy(void *dst, const void *src, u32 n): byte copy that returns
+ * -1 instead of crashing on a bus/access error (GDB memory access).
+ */
+	.text
+	.globl	safe_copy
+safe_copy:
+	movem.l	%d2-%d7/%a2-%a6,-(%sp)		/* 44 bytes; args at 48 */
+	lea	9f(%pc),%a0
+	move.l	%a0,probe_bus_resume
+	move.l	%sp,probe_sp
+	move.l	48(%sp),%a1
+	move.l	52(%sp),%a0
+	move.l	56(%sp),%d0
+	bra.s	2f
+1:	move.b	(%a0)+,(%a1)+
+2:	subq.l	#1,%d0
+	bpl.s	1b
+	moveq	#0,%d7
+	bra.s	8f
+9:	moveq	#-1,%d7
+8:	clr.l	probe_bus_resume
+	move.l	%d7,%d0
+	movem.l	(%sp)+,%d2-%d7/%a2-%a6
+	rts

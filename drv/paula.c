@@ -19,6 +19,12 @@ paula_tx(int c)
 }
 
 void
+paula_putc_raw(int c)
+{
+	paula_tx(c);
+}
+
+void
 paula_putc(int c)
 {
 	if (c == '\n')

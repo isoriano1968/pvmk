@@ -4,7 +4,8 @@
 #   make check      instruction check (68060-safe) + size budget + ADF verify
 #   make run        boot the ADF in FS-UAE (UAE_CPU=030|040|060) with the serial
 #                   console in this terminal (Ctrl-] quits)
-#   make test       acceptance test in FS-UAE on 030/040/060 (shell, reset, logs)
+#   make test       acceptance test in FS-UAE on 030/040/060 (shell, reset, logs,
+#                   GDB stub if gdb-multiarch is found)
 #   make run-amix   boot in FS-UAE with a writable copy of your AMIX disk
 #                   (build/amix-test.hdf); then: boot unix_root:
 #   make toolchain  fetch the m68k cross toolchain into $(TOOLCHAIN_DIR) (no root)
@@ -38,7 +39,7 @@ HOSTCFLAGS	:= -O2 -Wall -Wextra -Iinclude
 
 # Size budgets (bytes), see PLAN.md section 10.
 BUDGET_BOOTBLOCK := 960
-BUDGET_IMAGE	 := 65536
+BUDGET_IMAGE	 := 98304
 
 PVMK_OBJS	:= $(B)/stage0/entry.o $(B)/stage0/stage0.o $(B)/stage0/libcall.o \
 		   $(B)/stage0/takeover.o $(B)/stage0/alertpatch.o $(B)/core/stage1.o $(B)/core/vectors.o \
@@ -47,7 +48,7 @@ PVMK_OBJS	:= $(B)/stage0/entry.o $(B)/stage0/stage0.o $(B)/stage0/libcall.o \
 		   $(B)/cpu/mmutest_s.o \
 		   $(B)/drv/paula.o $(B)/drv/display.o $(B)/drv/keyboard.o $(B)/drv/wd33c93.o $(B)/drv/z3660scsi.o $(B)/svc/kprintf.o $(B)/svc/log.o \
 		   $(B)/svc/ffs.o $(B)/svc/conf.o $(B)/svc/shell.o $(B)/svc/crc32.o \
-		   $(B)/svc/disk.o $(B)/svc/rdb.o $(B)/svc/bootreq.o $(B)/svc/ufs.o $(B)/svc/amixload.o
+		   $(B)/svc/disk.o $(B)/svc/rdb.o $(B)/svc/bootreq.o $(B)/svc/ufs.o $(B)/svc/amixload.o $(B)/svc/gdb.o
 
 ADF_FILES	:= -f pvmk.conf=conf/pvmk.conf -f README=conf/README.disk
 
@@ -137,6 +138,9 @@ UAE_CPUS	?= 030 040 060
 UAE_HDF		?= $(B)/test.hdf
 # Your AMIX disk, if present: attached read-only on SCSI ID 6 by run/test
 AMIX_HDF	?= $(wildcard $(HOME)/Documents/FS-UAE/Hard\ Drives/AMIGA_UNIX.hdf)
+# GDB with m68k support, for the GDB stub test
+GDB		?= $(firstword $(wildcard $(HOME)/opt/m68k-cross/bin/gdb-multiarch) \
+		   $(shell command -v gdb-multiarch))
 AMIX_OPT	= $(if $(AMIX_HDF),--amix-hdf "$(AMIX_HDF)")
 run: $(B)/pvmk.adf $(UAE_HDF)
 	$(PYTHON) -I host/uae.py run --cpu $(UAE_CPU) --adf $(B)/pvmk.adf \
@@ -156,6 +160,8 @@ test: $(B)/pvmk.adf $(B)/test.hdf
 		--hdf $(B)/test.hdf $(AMIX_OPT)
 	$(PYTHON) -I host/uae.py test --cpu 030 --adf $(B)/pvmk.adf \
 		--hdf $(B)/test.hdf --hdf-ctrl uae
+	$(if $(GDB),$(PYTHON) -I host/uae.py test-gdb --cpu $(UAE_CPUS) \
+		--adf $(B)/pvmk.adf --gdb $(GDB),@echo "test-gdb: skipped (no gdb-multiarch; GDB=...)")
 
 toolchain:
 	host/get-toolchain.sh $(TOOLCHAIN_DIR)

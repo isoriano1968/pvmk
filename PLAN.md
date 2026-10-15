@@ -716,7 +716,12 @@ passes on 030/040/060 in FS-UAE, correctly fails on a 68EC030).
 Idle on STOP done: the CPU stops at the guest's interrupt level and the
 waking interrupt is delivered to the guest (serial input stays
 SORIX-LDOM's: Ctrl-C breaks in during idle too).
-Still open in M3: GDB stub.
+GDB stub done: RSP on the Paula port for the stopped guest (`gdb` command;
+target.xml, g/G/p/P, m/M fault-safe, Z0 breakpoints as ILLEGAL, step via
+T1, continue, detach, kill, noack, guest console as `O` packets); `make test`
+drives gdb-multiarch against pvtest on 030/040/060. Not yet: stub for pvmk
+itself, `$`-packet auto switch, `monitor` commands, watchpoints.
+M3 complete in FS-UAE; real-A3000 confirmation pending.
 
 ---
 

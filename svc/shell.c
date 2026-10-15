@@ -11,6 +11,7 @@
 #include "pvmk/bootreq.h"
 #include "pvmk/conf.h"
 #include "pvmk/ffs.h"
+#include "pvmk/gdb.h"
 #include "pvmk/keyboard.h"
 #include "pvmk/kprintf.h"
 #include "pvmk/layout.h"
@@ -737,8 +738,27 @@ cmd_pvtest(int argc, char **argv)
 	}
 	memcpy((void *)PVTEST_BASE, pvtest_image, size);
 	icache_inval(cpuinfo.model);
+	if (argc > 1 && streq(argv[argc - 1], "stop")) {
+		vcpu_prepare("pvtest", PVTEST_BASE, PVTEST_BASE,
+		    argc > 2 && streq(argv[1], "loop"));
+		kprintf("pvtest: ready, stopped at %08x (resume, or gdb)\n",
+		    PVTEST_BASE);
+		return;
+	}
 	vcpu_start("pvtest", PVTEST_BASE, PVTEST_BASE,
 	    argc > 1 && streq(argv[1], "loop"));
+}
+
+static void
+cmd_gdb(int argc, char **argv)
+{
+	(void)argc;
+	(void)argv;
+	if (!guest.active) {
+		kprintf("gdb: no guest (start one stopped: pvtest stop)\n");
+		return;
+	}
+	gdb_main();
 }
 
 static void
@@ -903,7 +923,8 @@ static const struct cmd cmds[] = {
 	{ "go",    "<addr>",            "call code at addr, print D0", cmd_go },
 	{ "load",  "dev:[path]",        "load and relocate an AMIX kernel", cmd_load },
 	{ "boot",  "<dev[:path]>",      "AmigaOS partition, or AMIX kernel", cmd_boot },
-	{ "pvtest", "[loop]",           "run the virtual CPU test guest", cmd_pvtest },
+	{ "pvtest", "[loop] [stop]",    "run the virtual CPU test guest", cmd_pvtest },
+	{ "gdb",   "",                  "serve GDB on the serial port (guest)", cmd_gdb },
 	{ "guest", "",                  "state of the stopped guest", cmd_guest },
 	{ "resume", "",                 "continue the stopped guest", cmd_resume },
 	{ "reset", "",                  "reboot into Kickstart", cmd_reset },
@@ -982,6 +1003,8 @@ shell_main(void)
 {
 	char line[LINE_MAX];
 
+	if (gdb_active)
+		gdb_main();		/* the guest stopped while GDB is attached */
 	autoboot();
 	kprintf("type 'help' for commands\n");
 	con_interactive(1);

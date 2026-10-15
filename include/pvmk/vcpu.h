@@ -58,6 +58,8 @@ struct vcpu {
 	u32 urp, srp40, tcr, itt0, itt1, dtt0, dtt1, pcr, buscr, mmusr40;
 
 	int exit_code;
+	u32 stop_sig;			/* why it stopped (GDB signal number) */
+	int stop_swbreak;		/* ... at a GDB software breakpoint */
 	u32 n_emul, n_reflect, n_hcall, n_irq, n_idle;
 	u32 idle_ms;			/* time spent waiting in STOP */
 };
@@ -68,7 +70,9 @@ extern struct vcpu guest;
  * D0 = d0. */
 void vcpu_start(const char *name, u32 pc, u32 ssp, u32 d0)
 	__attribute__((noreturn));
+void vcpu_prepare(const char *name, u32 pc, u32 ssp, u32 d0);	/* stopped */
 void vcpu_resume(void) __attribute__((noreturn));
+void vcpu_set_ps(u16 sr);		/* change the stopped guest's SR */
 void vcpu_show(void);
 
 /* From exception(): an exception taken while the guest ran (user mode). */

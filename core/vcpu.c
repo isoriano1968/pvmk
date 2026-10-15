@@ -18,6 +18,7 @@
  * an interrupt that arrives can always be delivered.
  */
 #include "pvmk/amiga.h"
+#include "pvmk/gdb.h"
 #include "pvmk/kprintf.h"
 #include "pvmk/log.h"
 #include "pvmk/paula.h"
@@ -590,11 +591,19 @@ emulate(struct excregs *r)
 /* ------------------------------------------------------------------ */
 /* Hypercalls and stopping                                             */
 
-static void
-stop_guest(struct excregs *r, const char *why) __attribute__((noreturn));
+#define SIGINT		2
+#define SIGTRAP		5
 
 static void
-stop_guest(struct excregs *r, const char *why)
+stop_guest(struct excregs *r, const char *why, u32 sig, int swbreak)
+    __attribute__((noreturn));
+
+/*
+ * Stop the guest and go to the shell (or back to GDB if it is attached);
+ * its registers are kept for resume.
+ */
+static void
+stop_guest(struct excregs *r, const char *why, u32 sig, int swbreak)
 {
 	u32 i;
 
@@ -605,6 +614,9 @@ stop_guest(struct excregs *r, const char *why)
 	guest.ctx.sr = real_sr(r);
 	guest.ctx.pc = r->pc;
 	guest.running = 0;
+	guest.stop_sig = sig;
+	guest.stop_swbreak = swbreak;
+	gdb_step = 0;
 	REG16(CUSTOM_INTENA) = 0x0800;		/* serial receive interrupt off */
 	con_interactive(0);
 	kprintf("vcpu: %s %s at PC %08x, SR %04x\n", guest.name, why, r->pc,
@@ -626,7 +638,12 @@ hypercall(struct excregs *r)
 		r->d[2] = cpuinfo.model;
 		break;
 	case HC_PUTC:
-		con_putc((int)(r->d[1] & 0xff));
+		if (gdb_active) {
+			u8 c8 = (u8)r->d[1];
+
+			gdb_console(&c8, 1);
+		} else
+			con_putc((int)(r->d[1] & 0xff));
 		break;
 	case HC_GETC:
 		if (rxlen) {
@@ -641,15 +658,18 @@ hypercall(struct excregs *r)
 		idle(r);
 		break;
 	case HC_WRITE:
-		for (i = 0; i < r->d[1]; i++)
-			con_putc(*(volatile u8 *)(uintptr_t)(r->a[0] + i));
+		if (gdb_active)
+			gdb_console((const u8 *)(uintptr_t)r->a[0], r->d[1]);
+		else
+			for (i = 0; i < r->d[1]; i++)
+				con_putc(*(volatile u8 *)(uintptr_t)(r->a[0] + i));
 		break;
 	case HC_EXIT:
 		guest.exit_code = (int)r->d[1];
 		guest.active = 0;
-		stop_guest(r, "exited");
+		stop_guest(r, "exited", 0, 0);
 	case HC_BREAK:
-		stop_guest(r, "stopped (break)");
+		stop_guest(r, "stopped (break)", SIGTRAP, 0);
 	default:
 		r->d[0] = (u32)-1;
 		break;
@@ -669,7 +689,7 @@ poll_serial(struct excregs *r)
 
 	while ((c = paula_getc()) >= 0) {
 		if (c == 0x03)
-			stop_guest(r, "stopped (Ctrl-C)");
+			stop_guest(r, "stopped (Ctrl-C)", SIGINT, 0);
 		if (rxlen < sizeof(rxbuf))
 			rxbuf[(rxhead + rxlen++) % sizeof(rxbuf)] = (u8)c;
 	}
@@ -681,6 +701,11 @@ vcpu_exception(struct excregs *r)
 	u32 vec = (r->fmtvec & 0xfff) >> 2;
 
 	poll_serial(r);
+	if (vec == 9 && gdb_step)			/* GDB single-step */
+		stop_guest(r, "stepped", SIGTRAP, 0);
+	if (vec == VEC_ILLEGAL && rd16(r->pc) == 0x4afc &&
+	    gdb_breakpoint_at(r->pc))			/* GDB breakpoint */
+		stop_guest(r, "at breakpoint", SIGTRAP, 1);
 	if (vec >= 25 && vec <= 31) {			/* autovector interrupt */
 		if (vec == 29 && !(REG16(CUSTOM_INTREQR) & 0x1000)) {
 			r->sr = real_sr(r);		/* serial receive: ours */
@@ -695,6 +720,8 @@ vcpu_exception(struct excregs *r)
 		hypercall(r);				/* PC is past the TRAP */
 	} else
 		reflect(r, vec, 1, -1);
+	if (gdb_step)		/* an emulated or reflected instruction: one step */
+		stop_guest(r, "stepped", SIGTRAP, 0);
 	r->sr = real_sr(r);
 }
 
@@ -702,7 +729,7 @@ vcpu_exception(struct excregs *r)
 /* Starting, resuming                                                  */
 
 void
-vcpu_start(const char *name, u32 pc, u32 ssp, u32 d0)
+vcpu_prepare(const char *name, u32 pc, u32 ssp, u32 d0)
 {
 	memset(&guest, 0, sizeof(guest));
 	rxhead = rxlen = 0;
@@ -713,9 +740,32 @@ vcpu_start(const char *name, u32 pc, u32 ssp, u32 d0)
 	guest.ctx.a[7] = ssp;			/* virtual S = 1: real USP = ISP */
 	guest.ctx.sr = real_sr(&(struct excregs){ .sr = 0 });
 	guest.ctx.pc = pc;
+	guest.stop_sig = SIGTRAP;
+}
+
+void
+vcpu_start(const char *name, u32 pc, u32 ssp, u32 d0)
+{
+	vcpu_prepare(name, pc, ssp, d0);
 	kprintf("vcpu: starting %s at %08x (deprivileged, virtual SR 2700)\n",
 	    name, pc);
 	vcpu_resume();
+}
+
+void
+vcpu_set_ps(u16 sr)
+{
+	struct excregs r;
+	u32 i;
+
+	for (i = 0; i < 8; i++) {
+		r.d[i] = guest.ctx.d[i];
+		r.a[i] = guest.ctx.a[i];
+	}
+	r.sr = guest.ctx.sr;
+	set_vsr(&r, sr);
+	guest.ctx.a[7] = r.a[7];
+	guest.ctx.sr = real_sr(&r);
 }
 
 void
@@ -726,6 +776,9 @@ vcpu_resume(void)
 		restart(sstack_top(), shell_main);
 	}
 	guest.running = 1;
+	guest.ctx.sr &= (u16)~VSR_T1;
+	if (gdb_step || (guest.vsr & VSR_T1))
+		guest.ctx.sr |= VSR_T1;			/* trace */
 	con_interactive(0);
 	REG16(CUSTOM_INTENA) = 0xc800;		/* master + serial receive */
 	vcpu_enter(&guest.ctx, sstack_top());

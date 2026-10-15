@@ -7,6 +7,9 @@
       M1 acceptance test: boot to the shell, exercise commands, warm reset,
       check the previous-boot log; with --hdf also SCSI, partitions, ls and
       the AmigaOS boot request. Exit status 0 if all CPUs pass.
+  uae.py test-gdb --gdb GDB [--cpu 030 040 060] [--adf FILE]
+      GDB stub test: gdb-multiarch attaches to the stopped pvtest guest,
+      sets a breakpoint, continues, steps and detaches; pvtest completes.
 
 Environment: KICKSTART (A3000 ROM; default
 ~/Documents/FS-UAE/Kickstarts/A3000.47.111.rom), UAE_EXTRA (more FS-UAE
@@ -18,6 +21,7 @@ import os
 import pty
 import re
 import select
+import socket
 import subprocess
 import sys
 import termios
@@ -110,6 +114,47 @@ class Amiga:
         self.uae_log.close()
 
 
+def bridge(amiga, port, until=None, timeout=None, log=None):
+    """Connect the serial pty to a TCP port for GDB until the client closes
+    (or until() returns true). Returns the bytes seen on the serial side.
+    log: file to record the traffic in both directions."""
+    trace = open(log, "wb") if log else None
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", port))
+    srv.listen(1)
+    srv.settimeout(timeout)
+    cli, _ = srv.accept()
+    seen = b""
+    try:
+        while amiga.proc.poll() is None:
+            r, _, _ = select.select([amiga.master, cli], [], [], 0.5)
+            if amiga.master in r:
+                data = amiga.read(0)
+                seen += data
+                try:
+                    cli.sendall(data)
+                except OSError:		# GDB went away (detach, kill)
+                    break
+                if trace:
+                    trace.write(b"\n<< " + data)
+            if cli in r:
+                data = cli.recv(4096)
+                if not data:
+                    break
+                os.write(amiga.master, data)
+                if trace:
+                    trace.write(b"\n>> " + data)
+            if until and until():
+                break
+    finally:
+        cli.close()
+        srv.close()
+        if trace:
+            trace.close()
+    return seen
+
+
 def cmd_run(args):
     amiga = Amiga(args.cpu, args.adf, "build/serial.log", args.hdf,
                   amix_hdf=args.amix_hdf, amix_ro=not args.amix_rw)
@@ -117,11 +162,39 @@ def cmd_run(args):
           " (log: build/serial.log). Ctrl-] quits.\r", flush=True)
     stdin = sys.stdin.fileno()
     saved = termios.tcgetattr(stdin) if os.isatty(stdin) else None
+    srv = None
+    if args.gdb_port:
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", args.gdb_port))
+        srv.listen(1)
+        print(f"uae.py: GDB: type 'gdb' in the shell, then in GDB: "
+              f"target remote localhost:{args.gdb_port}\r", flush=True)
+    cli = None
     try:
         if saved:
             tty.setraw(stdin)
         while amiga.proc.poll() is None:
-            r, _, _ = select.select([amiga.master, stdin], [], [], 0.5)
+            fds = [amiga.master, stdin] + ([srv] if srv and not cli else []) \
+                + ([cli] if cli else [])
+            r, _, _ = select.select(fds, [], [], 0.5)
+            if srv in r:
+                cli, _ = srv.accept()
+                print("\r\nuae.py: GDB connected (serial goes to GDB)\r",
+                      flush=True)
+                continue
+            if cli and cli in r:
+                data = cli.recv(4096)
+                if not data:
+                    cli.close()
+                    cli = None
+                    print("\r\nuae.py: GDB disconnected\r", flush=True)
+                else:
+                    os.write(amiga.master, data)
+                continue
+            if cli and amiga.master in r:
+                cli.sendall(amiga.read(0))
+                continue
             if amiga.master in r:
                 data = amiga.read(0)
                 os.write(sys.stdout.fileno(), data)
@@ -133,6 +206,10 @@ def cmd_run(args):
     finally:
         if saved:
             termios.tcsetattr(stdin, termios.TCSADRAIN, saved)
+        if cli:
+            cli.close()
+        if srv:
+            srv.close()
         amiga.stop()
         print("\nuae.py: stopped")
     return 0
@@ -236,6 +313,64 @@ def test_one(cpu, adf, hdf, ctrl="scsi", amix_hdf=None):
     return True
 
 
+def gdb_one(cpu, adf, gdb, elf="build/pvtest.elf", port=2345):
+    log = f"build/serial-gdb-{cpu}.log"
+    amiga = Amiga(cpu, adf, log)
+    step = "boot"
+    try:
+        amiga.expect(re.escape(PROMPT), 120)
+        step = "pvtest stop"
+        amiga.send(b"pvtest stop\r")
+        amiga.expect(rb"ready, stopped", 20)
+        amiga.expect(re.escape(PROMPT), 10)
+        step = "gdb"
+        amiga.send(b"gdb\r")
+        amiga.expect(rb"serial port handed to GDB", 10)
+        import threading
+        t = threading.Thread(target=bridge, args=(amiga, port), daemon=True,
+                             kwargs={"timeout": 30,
+                                     "log": f"build/gdb-traffic-{cpu}.log"})
+        t.start()
+        time.sleep(0.5)
+        step = "gdb session"
+        g = subprocess.run(
+            [gdb, "-nx", "-batch", "-ex", "set remotetimeout 10",
+             "-ex", f"file {elf}", "-ex", f"target remote localhost:{port}",
+             "-ex", "info registers pc ps", "-ex", "break pass",
+             "-ex", "continue", "-ex", "stepi", "-ex", "info registers pc",
+             "-ex", "x/xw 0x60000", "-ex", "delete", "-ex", "detach"],
+            capture_output=True, text=True, timeout=60)
+        out = g.stdout
+        for want in (r"pc\s+0x60000\s", r"ps\s+0x2700",
+                     r"Breakpoint 1, 0x[0-9a-f]+ in pass ",
+                     r"pc\s+0x[0-9a-f]+\s+0x[0-9a-f]+ <pass\+2>",
+                     r"0x60000 <_start>:\s+0x4ff90006", r"detached"):
+            if not re.search(want, out):
+                print(f"uae.py test-gdb: {cpu}: FAIL: no /{want}/ in GDB "
+                      f"output (log: {log})")
+                print("    | " + (out + g.stderr)[-1500:].replace(
+                    "\n", "\n    | "))
+                return False
+        t.join(10)
+        step = "after detach"
+        amiga.expect(rb"pvtest: done, 0 failed", 60)
+    except (TimeoutError, subprocess.TimeoutExpired) as e:
+        tail = (amiga.buf or b"")[-600:].decode("latin-1")
+        print(f"uae.py test-gdb: {cpu}: FAIL at '{step}' waiting for {e} "
+              f"(log: {log})")
+        print("    | " + tail.replace("\r", "").replace("\n", "\n    | "))
+        return False
+    finally:
+        amiga.stop()
+    print(f"uae.py test-gdb: {cpu}: PASS (log: {log})")
+    return True
+
+
+def cmd_test_gdb(args):
+    ok = all([gdb_one(cpu, args.adf, args.gdb) for cpu in args.cpu])
+    return 0 if ok else 1
+
+
 def cmd_test(args):
     ok = all([test_one(cpu, args.adf, args.hdf, args.hdf_ctrl, args.amix_hdf)
               for cpu in args.cpu])
@@ -250,6 +385,8 @@ def main():
     r.add_argument("--adf", default="build/pvmk.adf")
     r.add_argument("--hdf", help="RDB hard disk image on the internal SCSI")
     r.add_argument("--amix-hdf", help="AMIX disk image (SCSI ID 6)")
+    r.add_argument("--gdb-port", type=int,
+                   help="TCP port for GDB (target remote localhost:PORT)")
     r.add_argument("--amix-rw", action="store_true",
                    help="attach the AMIX disk writable (use a copy!)")
     t = sub.add_parser("test")
@@ -262,8 +399,14 @@ def main():
     t.add_argument("--hdf-ctrl", choices=["scsi", "uae"], default="scsi",
                    help="scsi: A3000 internal SCSI; uae: UAE's own driver "
                    "(uaehf.device), like accelerator/Zorro controllers")
+    g = sub.add_parser("test-gdb")
+    g.add_argument("--cpu", nargs="+", choices=CPU_OPTS,
+                   default=["030", "040", "060"])
+    g.add_argument("--adf", default="build/pvmk.adf")
+    g.add_argument("--gdb", default="gdb-multiarch", help="GDB with m68k")
     args = p.parse_args()
-    return cmd_run(args) if args.cmd == "run" else cmd_test(args)
+    return {"run": cmd_run, "test": cmd_test,
+            "test-gdb": cmd_test_gdb}[args.cmd](args)
 
 
 if __name__ == "__main__":

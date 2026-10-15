@@ -22,7 +22,8 @@ gdb-multiarch from the host's Debian/Ubuntu apt repositories into
 ```sh
 make            # build/pvmk.adf, verified
 make check      # 68060-safe instruction check, size budget, ADF verify
-make test       # FS-UAE A3000 with 68030/040/060: boot, shell commands, reset, logs
+make test       # FS-UAE A3000 with 68030/040/060: boot, shell commands, reset, logs,
+                #   and the GDB stub (if gdb-multiarch is found; GDB=...)
 make run        # boot in FS-UAE with the serial console in this terminal (Ctrl-] quits)
 make run UAE_CPU=060
 make run UAE_HDF=                # without the test hard disk
@@ -136,7 +137,22 @@ The boot log survives a warm reset: `dmesg -p` shows the previous boot.
   and 68040/68060 MMU) must pass before a guest starts: CPUs or accelerator
   modes without a working MMU are refused. STOP (and the idle hypercall)
   really idles the CPU until an interrupt the guest has not masked, then
-  delivers it. Still to do in M3: GDB stub.
+  delivers it. GDB stub: `gdb` in the shell hands the serial port to GDB
+  for the stopped guest (registers, memory, breakpoints, single step,
+  continue, detach; guest console output arrives as GDB output). M3 is
+  complete in FS-UAE; to be confirmed on the real A3000.
+
+Debugging pvtest with GDB in FS-UAE:
+
+```sh
+python3 host/uae.py run --gdb-port 2345    # SORIX-LDOM> pvtest stop
+                                           # SORIX-LDOM> gdb
+gdb-multiarch build/pvtest.elf -ex 'target remote localhost:2345'
+```
+
+On real hardware: `target remote /dev/ttyUSB0` after `set serial baud 115200`.
+GDB's own m68k breakpoint (TRAP #15) is the hypercall, so breakpoints are
+ILLEGAL instructions the stub tells apart by address.
 - Hard disk boot of SORIX-LDOM itself (`PVMK` partition, `pvinstall`) is
   the last milestone (M9); the boot floppy is the boot medium until then.
 
