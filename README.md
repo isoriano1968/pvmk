@@ -132,7 +132,10 @@ The boot log survives a warm reset: `dmesg -p` shows the previous boot.
   and interrupts are reflected through the guest's own VBR, TRAP #15 is a
   hypercall. Ctrl-C stops a running guest and opens the shell; `resume`
   continues it. The pvtest guest passes on 68030, 68040 and 68060 in
-  FS-UAE. Still to do in M3: MMU self-test, GDB stub.
+  FS-UAE. A boot-time MMU self-test (translation, write, fault; 68030 PMMU
+  and 68040/68060 MMU) must pass before a guest starts: CPUs or accelerator
+  modes without a working MMU are refused. Still to do in M3: GDB stub,
+  idle on STOP.
 - Hard disk boot of SORIX-LDOM itself (`PVMK` partition, `pvinstall`) is
   the last milestone (M9); the boot floppy is the boot medium until then.
 

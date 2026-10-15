@@ -72,6 +72,8 @@ exception(struct excregs *r)
 		vcpu_exception(r);		/* from the guest (user mode) */
 		return;
 	}
+	if (probe_bus_resume && (vec == 2 || vec == 3))
+		probe_abort();			/* MMU self-test: expected fault */
 	if (probe_resume && (vec == 4 || vec == 8 || vec == 10 || vec == 11)) {
 		r->pc = probe_resume;
 		return;

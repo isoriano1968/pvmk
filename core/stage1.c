@@ -47,6 +47,7 @@ stage1_main(void *arg)
 	    get_vbr(), sstack_top() - SSTACK_SIZE, sstack_top() - 1,
 	    sstack_top(), bc->hole_top - 1);
 	cpu_probe();
+	mmu_selftest();
 	cpu_show();
 	scsi_dma_buffer(bc->scsi_chip, SCSI_DMA_BLOCKS * 512);
 	/* native disk drivers, side by side */

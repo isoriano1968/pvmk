@@ -155,6 +155,7 @@ def test_one(cpu, adf, hdf, ctrl="scsi", amix_hdf=None):
         amiga.expect(rb"BLCJ", 60)
         amiga.expect(rb"takeover complete", 30)
         amiga.expect(rb"cpu: 68" + cpu.encode() + rb"[ ,]", 10)
+        amiga.expect(rb"cpu: MMU self-test passed", 10)
         amiga.expect(re.escape(PROMPT), 15)
         shell("ver", rb"SORIX-LDOM \S+, boot 1,")
         shell("help", rb"sload")

@@ -55,7 +55,8 @@ cpu_show(void)
 		    (cpuinfo.pcr >> 8) & 0xff, cpuinfo.pcr);
 	kprintf(", fpu %s, mmu %s\n", fpu_desc(),
 	    cpuinfo.model == 30 ? "68030 PMMU" :
-	    cpuinfo.model >= 40 ? "040/060 (off)" : "none");
+	    cpuinfo.model >= 40 ? "040/060" : "none");
+	kprintf("cpu: MMU self-test %s\n", mmu_result());
 	kprintf("cpu: VBR %08x, CACR %08x, SR %04x\n", get_vbr(), get_cacr(),
 	    get_sr());
 	if (cpuinfo.model == 20)

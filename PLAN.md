@@ -711,7 +711,9 @@ instructions for 030/040/060, exception and interrupt reflection, real IPL
 030/040/060, break-in with Ctrl-C and `resume` working. Break-in is checked
 on the serial interrupt and on every guest exception; a silent guest spinning
 with interrupts masked can only be stopped by the level 7 interrupt (to do).
-Still open in M3: MMU self-test, GDB stub, idle on STOP.
+MMU self-test done (boot time; guests refused without a working MMU;
+passes on 030/040/060 in FS-UAE, correctly fails on a 68EC030).
+Still open in M3: GDB stub, idle on STOP.
 
 ---
 

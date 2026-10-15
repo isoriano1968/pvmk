@@ -36,6 +36,7 @@ struct cpuinfo {
 	u32 model;			/* 20, 30, 40, 60 */
 	u32 pcr;			/* 68060 only */
 	int fpu;			/* -1 none, else FSAVE idle frame size */
+	int mmu_ok;			/* MMU self-test passed */
 };
 extern struct cpuinfo cpuinfo;
 void cpu_probe(void);
@@ -47,6 +48,12 @@ int probe_pcr(u32 *pcr);
 int probe_urp(void);
 int probe_cacr_fd(void);
 int probe_fpu(void);
+
+/* cpu/mmutest_s.S, cpu/mmutest.c */
+extern u32 probe_bus_resume;
+void probe_abort(void) __attribute__((noreturn));
+int  mmu_selftest(void);
+const char *mmu_result(void);
 
 /* core/stage1.c */
 void stage1_main(void *bootcap) __attribute__((noreturn));

@@ -730,6 +730,11 @@ cmd_pvtest(int argc, char **argv)
 {
 	u32 size = (u32)(pvtest_image_end - pvtest_image);
 
+	if (!cpuinfo.mmu_ok) {
+		kprintf("pvtest: guests need a working MMU (MMU self-test %s)\n",
+		    mmu_result());
+		return;
+	}
 	memcpy((void *)PVTEST_BASE, pvtest_image, size);
 	icache_inval(cpuinfo.model);
 	vcpu_start("pvtest", PVTEST_BASE, PVTEST_BASE,
