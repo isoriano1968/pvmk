@@ -204,8 +204,18 @@ back:	tst.b	ucheck
 	cmp.l	vblanks,%d2
 	RESULT	n_irqmask, eq
 
-	stop	#0x2700				/* emulated, continues */
+	stop	#0x2700				/* all masked: continues */
 	RESULT	n_stop, ra
+
+	/* STOP with interrupts enabled waits for one, which is delivered */
+	clr.l	vblanks
+	move.w	#0x0020,INTREQ
+	move.w	#0xc020,INTENA
+	stop	#0x2000
+	move.w	#0x2700,%sr
+	move.w	#0x0020,INTENA
+	tst.l	vblanks
+	RESULT	n_idle, ne
 
 	/* --- summary --- */
 	lea	s_done(%pc),%a0
@@ -324,7 +334,8 @@ n_kstack:	.asciz	"back on the supervisor stack"
 n_mmu:		.asciz	"mmu register (pmove tc / movec tc)"
 n_irq:		.asciz	"vertical blank interrupts delivered"
 n_irqmask:	.asciz	"masked interrupts held back"
-n_stop:		.asciz	"stop"
+n_stop:		.asciz	"stop with all interrupts masked"
+n_idle:		.asciz	"stop waits for an interrupt"
 
 	.data
 	.balign	4

@@ -58,7 +58,8 @@ struct vcpu {
 	u32 urp, srp40, tcr, itt0, itt1, dtt0, dtt1, pcr, buscr, mmusr40;
 
 	int exit_code;
-	u32 n_emul, n_reflect, n_hcall, n_irq;
+	u32 n_emul, n_reflect, n_hcall, n_irq, n_idle;
+	u32 idle_ms;			/* time spent waiting in STOP */
 };
 
 extern struct vcpu guest;
@@ -78,5 +79,7 @@ void vcpu_enter(const struct vctx *c, u32 ssp) __attribute__((noreturn));
 u32  fpu_save(void *buf);		/* FSAVE to buf; returns frame bytes */
 void fpu_restore(const void *buf);
 void cache_push_all(u32 model);
+u32  idle_stop(u32 level);		/* STOP until an interrupt > level */
+extern volatile u32 idle_active, idle_vec;
 
 #endif /* PVMK_VCPU_H */

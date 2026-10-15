@@ -297,6 +297,41 @@ reflect(struct excregs *r, u32 vec, int copy_frame, int ipl)
 /* ------------------------------------------------------------------ */
 /* Emulation                                                           */
 
+static void poll_serial(struct excregs *r);
+
+/*
+ * The guest waits for an interrupt (STOP, HC_IDLE): stop the real CPU at
+ * the guest's interrupt level until an interrupt it has not masked
+ * arrives, then deliver that interrupt. Serial input is SORIX-LDOM's
+ * (Ctrl-C breaks in); the CPU goes back to sleep after it. With all
+ * levels masked nothing could wake it, so the guest simply continues.
+ */
+static void
+idle(struct excregs *r)
+{
+	u32 level = (guest.vsr & VSR_IPL) >> 8, vec, s0, ms0, s1, ms1;
+
+	if (level >= 7)
+		return;
+	time_now(&s0, &ms0);
+	for (;;) {
+		vec = idle_stop(level);
+		guest.n_idle++;
+		if (vec == 29 && (REG16(CUSTOM_INTREQR) & 0x0800) &&
+		    !(REG16(CUSTOM_INTREQR) & 0x1000)) {
+			poll_serial(r);		/* may stop the guest */
+			continue;
+		}
+		break;
+	}
+	time_now(&s1, &ms1);
+	guest.idle_ms += (s1 - s0) * 1000 + ms1 - ms0;
+	if (vec >= 25 && vec <= 31) {
+		guest.n_irq++;
+		reflect(r, vec, 0, (int)(vec - 24));
+	}
+}
+
 static int
 movec(struct excregs *r, u16 op, u32 *pc)
 {
@@ -520,9 +555,12 @@ emulate(struct excregs *r)
 			return FAULT;
 	} else if (op == 0x4e73) {			/* RTE */
 		return rte(r);
-	} else if (op == 0x4e72) {			/* STOP #imm */
+	} else if (op == 0x4e72) {			/* STOP #imm: wait */
 		set_vsr(r, rd16(pc));
-		pc += 2;				/* no idling yet */
+		r->pc = pc + 2;
+		guest.n_emul++;
+		idle(r);
+		return 0;
 	} else if (op == 0x4e70) {			/* RESET: ignored */
 	} else if ((op & 0xff00) == 0x0e00) {		/* MOVES */
 		if (moves(r, op, &pc))
@@ -600,6 +638,7 @@ hypercall(struct excregs *r)
 		r->d[0] = (u32)c;
 		break;
 	case HC_IDLE:
+		idle(r);
 		break;
 	case HC_WRITE:
 		for (i = 0; i < r->d[1]; i++)
@@ -717,4 +756,6 @@ vcpu_show(void)
 	    guest.sfc, guest.dfc);
 	kprintf("  emulated %u, reflected %u, hypercalls %u, interrupts %u\n",
 	    guest.n_emul, guest.n_reflect, guest.n_hcall, guest.n_irq);
+	kprintf("  idle: %u wake-ups, %u ms waiting in STOP\n", guest.n_idle,
+	    guest.idle_ms);
 }

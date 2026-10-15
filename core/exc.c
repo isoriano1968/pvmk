@@ -68,6 +68,12 @@ exception(struct excregs *r)
 	u32 vec = (r->fmtvec & 0xfff) >> 2, fmt = r->fmtvec >> 12;
 	const u8 *frame = (const u8 *)&r->sr;
 
+	if (idle_active && vec >= 24 && vec <= 31) {
+		/* the interrupt that ends a guest's STOP: keep it pending */
+		idle_vec = vec;
+		r->sr |= 0x0700;
+		return;
+	}
 	if (!(r->sr & 0x2000) && guest.running) {
 		vcpu_exception(r);		/* from the guest (user mode) */
 		return;

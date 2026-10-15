@@ -713,7 +713,10 @@ on the serial interrupt and on every guest exception; a silent guest spinning
 with interrupts masked can only be stopped by the level 7 interrupt (to do).
 MMU self-test done (boot time; guests refused without a working MMU;
 passes on 030/040/060 in FS-UAE, correctly fails on a 68EC030).
-Still open in M3: GDB stub, idle on STOP.
+Idle on STOP done: the CPU stops at the guest's interrupt level and the
+waking interrupt is delivered to the guest (serial input stays
+SORIX-LDOM's: Ctrl-C breaks in during idle too).
+Still open in M3: GDB stub.
 
 ---
 

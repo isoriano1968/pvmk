@@ -51,3 +51,40 @@ cache_push_all:
 	rts
 1:	.short	0xf4f8			/* cpusha %bc */
 	rts
+
+/*
+ * u32 idle_stop(u32 level): STOP the CPU with interrupt mask = level (0-6),
+ * supervisor mode. The interrupt that ends it is taken nested; exception()
+ * records its vector in idle_vec and returns with interrupts masked, so it
+ * stays pending for the guest. Returns the vector.
+ */
+	.globl	idle_stop, idle_active, idle_vec
+idle_stop:
+	move.l	4(%sp),%d0
+	clr.l	idle_vec
+	move.l	#1,idle_active
+	lsl.w	#3,%d0
+	jmp	1f(%pc,%d0.w)
+1:	stop	#0x2000
+	bra.w	2f
+	stop	#0x2100
+	bra.w	2f
+	stop	#0x2200
+	bra.w	2f
+	stop	#0x2300
+	bra.w	2f
+	stop	#0x2400
+	bra.w	2f
+	stop	#0x2500
+	bra.w	2f
+	stop	#0x2600
+	bra.w	2f
+2:	move.w	#0x2700,%sr
+	clr.l	idle_active
+	move.l	idle_vec,%d0
+	rts
+
+	.bss
+	.balign	4
+idle_active:	.space	4
+idle_vec:	.space	4
