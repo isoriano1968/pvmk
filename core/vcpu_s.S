@@ -228,3 +228,10 @@ mmu040_off:
 	.short	0x4e7b,0x0007			/* dtt1 */
 	.short	0xf518				/* pflusha */
 	rts
+
+/* void pcr_write(u32 pcr): 68060 processor configuration register */
+	.globl	pcr_write
+pcr_write:
+	move.l	4(%sp),%d0
+	.short	0x4e7b,0x0808			/* movec %d0,%pcr */
+	rts

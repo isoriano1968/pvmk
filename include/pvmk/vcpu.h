@@ -91,6 +91,7 @@ void vcpu_enter_frame(const struct vctx *c, const void *frame, u32 size,
 u32  fpu_save(void *buf);		/* FSAVE to buf; returns frame bytes */
 void fpu_restore(const void *buf);
 void cache_push_all(u32 model);
+void pcr_write(u32 pcr);		/* 68060 */
 u32  idle_stop(u32 level);		/* STOP until an interrupt > level */
 extern volatile u32 idle_active, idle_vec;
 

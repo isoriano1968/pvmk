@@ -34,6 +34,8 @@
 #define R_68K_NONE	0
 #define R_68K_32	1
 #define R_68K_PC32	4		/* 040/060 port kernels (FPSP) */
+#define R_68K_PC16	5
+#define R_68K_PC8	6
 
 struct ehdr {
 	u8 ident[16];
@@ -263,11 +265,13 @@ relocate_rel(u8 *elf, u32 size, u32 base, struct amix_kernel *k)
 
 			if (type == R_68K_NONE)
 				continue;
-			if (type != R_68K_32 && type != R_68K_PC32) {
+			if (type != R_68K_32 && type != R_68K_PC32 &&
+			    type != R_68K_PC16 && type != R_68K_PC8) {
 				kprintf("amix: unsupported relocation type %u\n", type);
 				return -1;
 			}
-			if (si >= nsyms || r->offset + 4 > target->size) {
+			if (si >= nsyms || r->offset + (type == R_68K_PC16 ? 2 :
+			    type == R_68K_PC8 ? 1 : 4) > target->size) {
 				kprintf("amix: bad relocation %u in section %u\n", j,
 				    rs->info);
 				return -1;
@@ -285,9 +289,22 @@ relocate_rel(u8 *elf, u32 size, u32 base, struct amix_kernel *k)
 				return -1;
 			}
 			value += (u32)r->addend;
-			if (type == R_68K_PC32)		/* S + A - P */
+			if (type != R_68K_32)		/* S + A - P */
 				value -= target->addr + r->offset;
-			*(u32 *)(elf + target->offset + r->offset) = value;
+			if (type == R_68K_PC16) {
+				if ((s32)value != (s16)value) {
+					kprintf("amix: PC16 relocation %u out of range\n", j);
+					return -1;
+				}
+				*(u16 *)(elf + target->offset + r->offset) = value;
+			} else if (type == R_68K_PC8) {
+				if ((s32)value != (s8)value) {
+					kprintf("amix: PC8 relocation %u out of range\n", j);
+					return -1;
+				}
+				*(u8 *)(elf + target->offset + r->offset) = value;
+			} else
+				*(u32 *)(elf + target->offset + r->offset) = value;
 			k->nrel++;
 		}
 	}

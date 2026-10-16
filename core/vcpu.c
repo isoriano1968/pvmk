@@ -479,11 +479,29 @@ reflect(struct excregs *r, u32 vec, int copy_frame, int ipl)
 static void
 access_fault(struct excregs *r)
 {
-	u16 f[16];
+	u16 f[30];
 	u32 sz = afault.size == 1 ? 0x10 : afault.size == 2 ? 0x20 : 0;
 
 	memset(f, 0, sizeof(f));
-	if (cpuinfo.model >= 40) {
+	if (cpuinfo.model == 40) {
+		/*
+		 * 68040 access error frame (format 7): EA and fault address,
+		 * SSW with ATC, read/write, size and the function code, no
+		 * write-backs; marked so that the guest's RTE restarts the
+		 * instruction here instead of going to the CPU.
+		 */
+		f[4] = f[10] = (u16)(afault.va >> 16);
+		f[5] = f[11] = (u16)afault.va;
+		f[6] = (u16)(0x0400 | (afault.write ? 0 : 0x0100) |
+		    (afault.size == 1 ? 0x20 : afault.size == 2 ? 0x40 : 0) |
+		    (afault.fc & 7));
+		f[26] = AF_MAGIC1;		/* PD2, +0x34 */
+		f[27] = AF_MAGIC2;
+		afault.faulted = 0;
+		reflect_frame(r, VEC_BUSERR, (const u8 *)f, 7, -1);
+		return;
+	}
+	if (cpuinfo.model == 60) {
 		/*
 		 * 68060 access error frame (format 4): fault address, FSLW
 		 * with read/write, size, user/supervisor data and PF; its
@@ -587,6 +605,9 @@ idle(struct excregs *r)
 	}
 }
 
+static u32 guest_events(void);
+static u32 crp_next = 1, crp_events;	/* the instruction after PMOVE CRP / MOVEC URP */
+
 static int
 movec(struct excregs *r, u16 op, u32 *pc)
 {
@@ -625,16 +646,28 @@ movec(struct excregs *r, u16 op, u32 *pc)
 		*p = *rn;
 		if (cr == 0x002 && (*rn & 0x0808))	/* 030 cache clear bits */
 			cache_push_all(cpuinfo.model);
-		if (m >= 40 && (cr == 0x003 || (cr >= 0x004 && cr <= 0x007) ||
-		    cr == 0x806 || cr == 0x807))
-			vmmu_flush();		/* new MMU state: TC, TTs, roots */
+		if (m >= 40 && cr == 0x806) {	/* new user address space */
+			vmmu_flush_user();
+			crp_next = *pc;
+			crp_events = guest_events();
+		} else if (m >= 40 && (cr == 0x003 || (cr >= 0x004 &&
+		    cr <= 0x007) || cr == 0x807))
+			vmmu_flush();		/* new MMU state: TC, TTs, SRP */
+		if (cr == 0x808) {
+			/*
+			 * 68060 PCR: the guest's FPU disable (DFP, bit 1) and
+			 * superscalar enable (ESS, bit 0) go to the real PCR,
+			 * as its FP instructions run natively; the ID and
+			 * revision stay the CPU's.
+			 */
+			guest.pcr = (cpuinfo.pcr & ~3u) | (*rn & 3);
+			pcr_write(guest.pcr);
+		}
 	} else
 		*rn = *p;
 	return 0;
 }
 
-static u32 guest_events(void);
-static u32 crp_next = 1, crp_events;	/* the instruction after PMOVE CRP */
 
 /* 68030 PMMU: PMOVE, PFLUSH, PLOAD, PTEST (line F, coprocessor id 0). */
 static int
@@ -784,6 +817,8 @@ fsave_frestore(struct excregs *r, u16 op, u32 *pc)
 			n = 4;			/* still in the reset state */
 		} else
 			n = fpu_save(buf);
+		if (cpuinfo.model == 60)
+			n = 12;			/* 68060 frames: always 12 bytes */
 		if (mode == 4) {
 			r->a[regno] -= n;
 			e.addr = r->a[regno];
@@ -798,7 +833,7 @@ fsave_frestore(struct excregs *r, u16 op, u32 *pc)
 		e.addr = r->a[regno];
 	else if (ea_decode(r, mode, regno, 4, pc, &e) || e.is_reg)
 		return FAULT;
-	n = (u32)rd8(e.addr + 1) + 4;
+	n = cpuinfo.model == 60 ? 12 : (u32)rd8(e.addr + 1) + 4;
 	if (n > sizeof(buf))
 		return FAULT;
 	for (i = 0; i < n; i++)
@@ -808,7 +843,7 @@ fsave_frestore(struct excregs *r, u16 op, u32 *pc)
 	fpu_restore(buf);
 	if (mode == 3)
 		r->a[regno] += n;
-	null_pc = buf[0] == 0 ? *pc : 1;	/* null frame: FPU reset */
+	null_pc = cpuinfo.model != 60 && buf[0] == 0 ? *pc : 1;	/* null */
 	null_events = guest_events();
 	return 0;
 }
@@ -828,8 +863,9 @@ rte(struct excregs *r)
 	u16 sr = rd16(sp), fv = rd16(sp + 6);
 	u32 pc = rd32(sp + 2), fmt = fv >> 12, size = frame_size(fmt);
 
-	if (fmt == 0xa && rd16(sp + 8) == AF_MAGIC1 &&
-	    rd16(sp + 0x14) == AF_MAGIC2) {
+	if ((fmt == 0xa && rd16(sp + 8) == AF_MAGIC1 &&
+	    rd16(sp + 0x14) == AF_MAGIC2) || (fmt == 7 &&
+	    rd16(sp + 0x34) == AF_MAGIC1 && rd16(sp + 0x36) == AF_MAGIC2)) {
 		r->a[7] = sp + size;		/* ours: restart the instruction */
 		set_vsr(r, sr);
 		r->pc = pc;
@@ -847,6 +883,8 @@ rte(struct excregs *r)
 			return 0;		/* frame not readable */
 		fr[0] = real_sr(r);
 		fr[fmt == 7 ? 6 : 5] &= (u16)~4;	/* a user cycle again */
+		if (fmt == 7)
+			fr[7] &= (u16)~4, fr[8] &= (u16)~4, fr[9] &= (u16)~4;
 		save_ctx(r);
 		guest.n_emul++;
 		vmmu_activate();
@@ -1032,7 +1070,11 @@ emulate(struct excregs *r)
 	} else if ((op & 0xff00) == 0xf400 && cpuinfo.model >= 40) {
 		cache_push_all(cpuinfo.model);		/* CINV / CPUSH */
 	} else if ((op & 0xffe0) == 0xf500 && cpuinfo.model >= 40) {
-		vmmu_pflush();		/* PFLUSH (An), PFLUSHN, PFLUSHA */
+		/* PFLUSH (An), PFLUSHN, PFLUSHA; right after MOVEC URP (a
+		 * context switch) the user view is new already */
+		if (!(r->pc == crp_next && guest_events() == crp_events + 1))
+			vmmu_pflush();
+		crp_next = 1;
 	} else if ((op & 0xffd8) == 0xf548 && cpuinfo.model == 40) {
 		guest.mmusr40 = 0;			/* PTEST */
 	} else if ((op & 0xffb8) == 0xf588 && cpuinfo.model == 60) {
@@ -1286,8 +1328,14 @@ vcpu_exception(struct excregs *r)
 		 */
 		if ((guest.vsr & VSR_S) && (r->fmtvec >> 12) == 4)
 			*(u32 *)((u8 *)&r->sr + 0x0c) |= 0x00040000;
-		else if ((guest.vsr & VSR_S) && (r->fmtvec >> 12) == 7)
-			*((u16 *)&r->sr + 6) |= 4;	/* SSW TM: supervisor */
+		else if ((guest.vsr & VSR_S) && (r->fmtvec >> 12) == 7) {
+			u16 *f7 = (u16 *)&r->sr;
+
+			f7[6] |= 4;		/* SSW TM: supervisor */
+			for (k = 7; k <= 9; k++)	/* WB3S, WB2S, WB1S TM */
+				if (f7[k] & 0x80)
+					f7[k] |= 4;
+		}
 		else if (guest.vsr & VSR_S)
 			*((u16 *)&r->sr + 5) |= 4;	/* SSW FC: supervisor */
 		reflect(r, vec, 1, -1);
@@ -1330,6 +1378,7 @@ vcpu_prepare(const char *name, u32 pc, u32 ssp, u32 d0)
 	guest.ctx.sr = real_sr(&(struct excregs){ .sr = 0 });
 	guest.ctx.pc = pc;
 	guest.stop_sig = SIGTRAP;
+	guest.pcr = cpuinfo.pcr;		/* 68060: as the CPU reports it */
 }
 
 void

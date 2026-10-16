@@ -85,6 +85,7 @@ static u32 *l3free;			/* recycled L3 blocks */
 static u32 n_kept, n_dropped, n_pflush;
 static void l3_release(u32 i);
 static int fault040(struct excregs *r);
+static int next_page(u32 fa, int write);
 
 static u32
 dsig(u32 a)				/* a guest descriptor's value */
@@ -164,9 +165,23 @@ static int enabled;			/* shadow active (68030) */
 static u32 n_fill, n_wp, n_guestfault, n_flush, n_reset;
 
 /* the first faults passed to the guest, for the shell's "guest" */
-#define NLOG		6
+#define NLOG		12		/* the first 4, then the last 8 */
 static struct { u32 va, pc; u16 ssw, mmusr; u8 super, write; } flog[NLOG];
-static u32 nflog;
+static u32 nflog;			/* faults logged in all */
+
+static void
+flog_add(u32 va, u32 pc, u32 ssw, u32 mmusr, int super, int write)
+{
+	u32 i = nflog < 4 ? nflog : 4 + (nflog - 4) % (NLOG - 4);
+
+	flog[i].va = va;
+	flog[i].pc = pc;
+	flog[i].ssw = (u16)ssw;
+	flog[i].mmusr = (u16)mmusr;
+	flog[i].super = (u8)super;
+	flog[i].write = (u8)write;
+	nflog++;
+}
 static u32 cur_pc;
 static u16 cur_ssw;
 
@@ -296,7 +311,7 @@ vmmu_flush_user(void)
 {
 	struct view *v = &views[0];
 
-	if (!(guest.tc & TC_SRE)) {		/* no SRE: CRP is both */
+	if (cpuinfo.model == 30 && !(guest.tc & TC_SRE)) {	/* CRP is both */
 		vmmu_flush();
 		return;
 	}
@@ -830,14 +845,8 @@ shadow_fill(u32 va, int write)
 		return 0;
 	sr = walk(va, super ? 5 : 1, write, 1, 7, &w);
 	if ((sr & MMUSR_FAULT) || (write && w.wp)) {
-		if (nflog < NLOG) {
-			flog[nflog].va = va;
-			flog[nflog].pc = cur_pc;
-			flog[nflog].ssw = cur_ssw;
-			flog[nflog].mmusr = sr;
-			flog[nflog].super = (u8)super;
-			flog[nflog++].write = (u8)write;
-		}
+		flog_add(va, cur_pc, cur_ssw, sr,
+		    (u8)super, (u8)write);
 		n_guestfault++;
 		return -1;
 	}
@@ -898,6 +907,19 @@ writeback040(u8 *f, u32 so, u32 ao, u32 dO)
 	return 0;
 }
 
+/*
+ * The 68040/68060 report an access that runs into the next page (an
+ * instruction or operand straddling the boundary) at its start, whose page
+ * may already be mapped: then the next page is the one missing.
+ */
+static int
+next_page(u32 fa, int write)
+{
+	if ((fa & (SH_PAGE - 1)) < SH_PAGE - 16)
+		return 0;
+	return shadow_fill((fa | (SH_PAGE - 1)) + 1, write);
+}
+
 static int
 fault040(struct excregs *r)
 {
@@ -910,15 +932,20 @@ fault040(struct excregs *r)
 	cur_ssw = ssw;
 	if (!(ssw & 0x0400))
 		return -1;			/* a bus error, not the MMU */
-	if ((k = shadow_fill(fa, write)) <= 0) {
-		if (k == 0 && nflog < NLOG) {	/* a real access error */
-			flog[nflog].va = fa;
-			flog[nflog].pc = r->pc;
-			flog[nflog].ssw = ssw;
-			flog[nflog].mmusr = 0;
-			flog[nflog].super = (guest.vsr & VSR_S) != 0;
-			flog[nflog++].write = (u8)write;
-		}
+	if ((k = shadow_fill(fa, write)) == 0 && (k = next_page(fa, write)) < 0) {
+		/*
+		 * The access runs into the next page, which the guest has not
+		 * mapped: name that page in the frame (the 68040 reports the
+		 * start of the access, with MA), so the guest maps the right one.
+		 */
+		*(u32 *)(f + 0x14) = (fa | (SH_PAGE - 1)) + 1;
+		*(u16 *)(f + 0x0c) = ssw & ~0x0800;
+		return -1;
+	}
+	if (k <= 0) {
+		if (k == 0)	/* a real access error */
+			flog_add(fa, r->pc, ssw, 0,
+			    (guest.vsr & VSR_S) != 0, (u8)write);
 		return -1;
 	}
 	if (writeback040(f, 0x0e, 0x18, 0x1c) ||	/* WB3 */
@@ -936,7 +963,7 @@ fault040(struct excregs *r)
 int
 vmmu_fault(struct excregs *r)
 {
-	const u8 *f = (const u8 *)&r->sr;
+	u8 *f = (u8 *)&r->sr;
 	u16 ssw = *(const u16 *)(f + 0x0a);
 	u32 fmt = r->fmtvec >> 12, sb, done = 0;
 	int k;
@@ -955,14 +982,18 @@ vmmu_fault(struct excregs *r)
 		cur_ssw = (u16)fslw;
 		if ((k = shadow_fill(fa, (fslw & 0x00800000) != 0)) > 0)
 			return 0;
-		if (k == 0 && nflog < NLOG) {	/* a real access error */
-			flog[nflog].va = fa;
-			flog[nflog].pc = r->pc;
-			flog[nflog].ssw = (u16)fslw;
-			flog[nflog].mmusr = 0;
-			flog[nflog].super = (guest.vsr & VSR_S) != 0;
-			flog[nflog++].write = (fslw & 0x00800000) != 0;
+		if (k == 0 && (k = next_page(fa, (fslw & 0x00800000) != 0)) > 0)
+			return 0;
+		if (k < 0 && (fa & (SH_PAGE - 1)) >= SH_PAGE - 16 &&
+		    shadow_get(&views[(guest.vsr & VSR_S) != 0], fa) & D_DT) {
+			/* the next page is the guest's missing one: name it */
+			*(u32 *)(f + 8) = (fa | (SH_PAGE - 1)) + 1;
+			*(u32 *)(f + 0x0c) = fslw & ~0x08000000;
+			return -1;
 		}
+		if (k == 0)	/* a real access error */
+			flog_add(fa, r->pc, (u16)fslw, 0,
+			    (guest.vsr & VSR_S) != 0, (fslw & 0x00800000) != 0);
 		return -1;
 	}
 	if (fmt == 7)
@@ -1008,14 +1039,9 @@ vmmu_fault(struct excregs *r)
 			return -1;
 		done += (u32)k;
 	}
-	if (!done && nflog < NLOG) {		/* a real bus error: log it */
-		flog[nflog].va = *(const u32 *)(f + 0x10);
-		flog[nflog].pc = r->pc;
-		flog[nflog].ssw = ssw;
-		flog[nflog].mmusr = 0;
-		flog[nflog].super = (guest.vsr & VSR_S) != 0;
-		flog[nflog++].write = !(ssw & 0x0040);
-	}
+	if (!done)		/* a real bus error: log it */
+		flog_add(*(const u32 *)(f + 0x10), r->pc, ssw, 0,
+		    (guest.vsr & VSR_S) != 0, !(ssw & 0x0040));
 	return done ? 0 : -1;			/* nothing missing: real error */
 }
 
@@ -1118,9 +1144,16 @@ vmmu_show(void)
 	for (u32 i = 0; i < nwlog; i++)
 		kprintf("  watch: write via %08x at PC %08x\n", wlog[i].va,
 		    wlog[i].pc);
-	for (u32 i = 0; i < nflog; i++)
+	for (u32 n = 0; n < nflog && n < NLOG; n++) {
+		u32 i = n < 4 || nflog <= NLOG ? n :
+		    4 + (nflog - (NLOG - 4) + (n - 4) - 4) % (NLOG - 4);
+
+		if (n == 4 && nflog > NLOG)
+			kprintf("  ... %u more, the last %u:\n", nflog - NLOG,
+			    NLOG - 4);
 		kprintf("  guest fault: %s %s %08x at PC %08x, SSW %04x, "
 		    "MMUSR %04x\n", flog[i].super ? "kernel" : "user",
 		    flog[i].write ? "write" : "read", flog[i].va, flog[i].pc,
 		    flog[i].ssw, flog[i].mmusr);
+	}
 }

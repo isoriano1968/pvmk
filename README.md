@@ -157,7 +157,11 @@ On real hardware: `target remote /dev/ttyUSB0` after `set serial baud 115200`.
   to multi-user and login, slowly (every spl traps; M6 makes that fast).
   A reboot goes through SORIX-LDOM, which boots the kernel again. Break in
   with Ctrl + Left Amiga + Help (FS-UAE on a PC: Left Ctrl + Left Windows
-  + End) or Ctrl-C on serial; `resume` gives AMIX its screen back. Shell aids:
+  + End) or Ctrl-C on serial; `resume` gives AMIX its screen back.
+- M7: shadow MMU for the 68040 and 68060 too. The amigaux.org 040/060
+  AMIX kernel boots deprivileged to the login prompt in FS-UAE on both
+  (`boot -pv unix_root:/stand/unix-040`); next is the Z3660 in its real
+  68060 mode. Shell aids:
   `guest log` (AMIX kernel messages), `pt` (page table walk), `md -g`,
   `watch`. Not yet on 68040/68060 (AMIX's 2 KB pages).
 GDB's own m68k breakpoint (TRAP #15) is the hypercall, so breakpoints are

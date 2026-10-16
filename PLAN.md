@@ -780,7 +780,19 @@ gained MMU tests (own tables in chip RAM: read through the tables,
 write-protect fault fixed and rerun, invalid page mapped and rerun,
 PTEST on the 68030, translation off), passing on 68030, 68040 and
 68060; on the 68040 the handler completes write-backs like a real OS.
-Next: AMIX 040/060 port kernel deprivileged (A1), real hardware.
+AMIX's 040/060 port kernel (A1, built by the AMIX-side work: /stand/
+unix-040 on the test disk) boots deprivileged to the login prompt in
+FS-UAE on the 68060 and the 68040 (`boot -pv unix_root:/stand/unix-040`;
+fsck, the guest reboot through SORIX-LDOM, multi-user). Needed on the
+way: R_68K_PC16/PC8 relocations in the loader; the guest's 68060 PCR
+DFP/ESS bits reach the real PCR (the FPU starts disabled); 68060 FPU
+frames are 12 bytes; an access that runs into the next page (reported at
+its start, with MA) fills that page, and when the guest has not mapped
+it the reflected frame names that page (as Linux's MA rule); MOVEC URP
+rebuilds only the user view (context switch: full flushes 24,007 ->
+89); faulting emulated accesses get a format 7 frame on the 68040; the
+write-back TM fields carry the supervisor bit for the guest kernel's
+faults. Next: real hardware (Z3660 in its 68060 mode).
 M6 in progress (68030, FS-UAE). Measured on the time from `boot -pv` to
 AMIX's login screen (fresh copy of a clean disk): 148 s before M6.
 `guest stats` profiles the emulated instructions and the shadow. Done:
