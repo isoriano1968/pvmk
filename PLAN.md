@@ -763,6 +763,17 @@ T1, continue, detach, kill, noack, guest console as `O` packets); `make test`
 drives gdb-multiarch against pvtest on 030/040/060. Not yet: stub for pvmk
 itself, `$`-packet auto switch, `monitor` commands, watchpoints.
 M3 complete in FS-UAE; real-A3000 confirmation pending.
+Ending a guest from SORIX-LDOM: `shutdown` asks AMIX to shut down
+cleanly. SORIX-LDOM injects a call into the guest like an interrupt (a
+format 0 frame on its supervisor stack, IPL 7) as soon as it runs at
+interrupt level 0, to a trampoline written into the unused tail of the
+patched lcopyin: psignal(proc_init, SIGPWR); init runs the powerfail
+entry of /etc/inittab (shutdown -y -i0 -g0), which halts through
+HC_HALT; the console comes back on the screen. Tested in FS-UAE (68030):
+halted ~3 minutes later, the next boot needed no fsck. `kill` discards
+any guest at once (MMU, interrupts, DMA, screen, keyboard and SCSI back
+to SORIX-LDOM); AMIX's file systems are then checked at its next boot.
+The AmigaOS personality (M8) will be ended with `kill` (or a reboot).
 M7 in progress (FS-UAE): shadow MMU for the 68040 and 68060. The shadow
 geometry is per CPU family (68030 8/8/5 with 2 KB pages; 68040/68060
 7/7/6 with 4 KB pages, aligned tables; the descriptor bits used are the

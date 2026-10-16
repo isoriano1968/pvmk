@@ -890,8 +890,11 @@ screen_take(void)
 	display_init(bootcap.disp_chip, bootcap.vblank == 50, bootcap.font);
 	kbd_init((int)bootcap.conf.keymap);
 	screen_taken = 1;
-	kprintf("SORIX-LDOM console (guest %s stopped; resume to go back)\n",
-	    guest.name);
+	if (guest.active)
+		kprintf("SORIX-LDOM console (guest %s stopped; resume to go "
+		    "back)\n", guest.name);
+	else
+		kprintf("SORIX-LDOM console (guest %s has ended)\n", guest.name);
 }
 
 static void
@@ -920,6 +923,58 @@ screen_give(void)
 		    "back when it loads a new one\n");
 	REG16(0xdff096) = (u16)(0x8000 | (dmacon_save & 0x07ff));
 	screen_taken = 0;
+}
+
+/*
+ * Clean shutdown of the guest: AMIX gets SIGPWR for init (see
+ * amix_pv_patch), runs the powerfail entry of /etc/inittab (shutdown) and
+ * halts back into this shell.
+ */
+static void
+cmd_shutdown(int argc, char **argv)
+{
+	(void)argc;
+	(void)argv;
+	if (!guest.active) {
+		kprintf("shutdown: no guest\n");
+		return;
+	}
+	if (!streq(guest.name, "amix") || !amixk.shutdown_call) {
+		kprintf("shutdown: %s has no shutdown request (AMIX deprivileged "
+		    "with its PV patches has); use kill\n", guest.name);
+		return;
+	}
+	kprintf("shutdown: SIGPWR to AMIX's init (the powerfail entry of "
+	    "/etc/inittab runs shutdown); it halts back to this shell\n");
+	vcpu_inject(amixk.shutdown_call);
+	screen_give();
+	vcpu_resume();
+}
+
+/* Hard stop: the guest is discarded; SORIX-LDOM takes the machine back. */
+static void
+cmd_kill(int argc, char **argv)
+{
+	(void)argc;
+	(void)argv;
+	if (!guest.active) {
+		kprintf("kill: no guest\n");
+		return;
+	}
+	guest.active = 0;
+	guest.inject_pc = 0;
+	vmmu_off();
+	REG16(CUSTOM_INTENA) = 0x7fff;
+	REG16(CUSTOM_INTREQ) = 0x7fff;
+	REG16(0xdff096) = 0x7dff;		/* DMA channels off */
+	if (!screen_taken && bootcap.disp_chip)
+		display_init(bootcap.disp_chip, bootcap.vblank == 50, bootcap.font);
+	screen_taken = 0;			/* nothing to give back now */
+	kbd_init((int)bootcap.conf.keymap);
+	scsi_init();
+	kprintf("kill: %s discarded%s\n", guest.name, streq(guest.name, "amix") ?
+	    "; its file systems were not unmounted, the next boot checks them" :
+	    "");
 }
 
 static void
@@ -1289,6 +1344,8 @@ static const struct cmd cmds[] = {
 	{ "gdb",   "",                  "serve GDB on the serial port (guest)", cmd_gdb },
 	{ "guest", "[log|stats]",       "stopped guest: state, AMIX messages, profile", cmd_guest },
 	{ "resume", "",                 "continue the stopped guest", cmd_resume },
+	{ "shutdown", "",               "shut the guest down cleanly (AMIX)", cmd_shutdown },
+	{ "kill",  "",                  "discard the guest (hard stop)", cmd_kill },
 	{ "watch", "[addr]",            "log guest writes to addr (shadow MMU)", cmd_watch },
 	{ "pt",    "<addr> [u]",        "guest page table walk (u: user view)", cmd_pt },
 	{ "reset", "",                  "reboot into Kickstart", cmd_reset },

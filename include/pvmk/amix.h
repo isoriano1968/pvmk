@@ -39,6 +39,8 @@ struct amix_kernel {
 	u32 putbuf, putbufsz, putbufwpos;
 	/* for the PV patches (deprivileged start) */
 	u32 lcopyin, lcopyout, sf_fault, u, haltsys;
+	u32 psignal, proc_init;		/* for a clean shutdown (SIGPWR) */
+	u32 shutdown_call;		/* trampoline: psignal(proc_init, SIGPWR) */
 	u32 loadedcoplist;		/* its display's copper lists, for resume */
 	u32 execingcoplist;
 	/* 68040/68060 port kernels (amigaux.org): the loader sets cputype */
@@ -48,7 +50,7 @@ struct amix_kernel {
 /* Deprivileged start: replace copy loops and haltsys with hypercalls
  * (kernel already at its final address). Returns the number of routines
  * patched (3 for the stock 2.1c kernel). */
-int amix_pv_patch(const struct amix_kernel *k);
+int amix_pv_patch(struct amix_kernel *k);
 
 /* Relocate an ELF kernel image in place for text at base. 0 on success;
  * otherwise a message has been printed. */

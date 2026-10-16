@@ -158,6 +158,8 @@ On real hardware: `target remote /dev/ttyUSB0` after `set serial baud 115200`.
   A reboot goes through SORIX-LDOM, which boots the kernel again. Break in
   with Ctrl + Left Amiga + Help (FS-UAE on a PC: Left Ctrl + Left Windows
   + End) or Ctrl-C on serial; `resume` gives AMIX its screen back.
+  `shutdown` shuts a stopped AMIX down cleanly (SIGPWR to its init, the
+  powerfail entry of /etc/inittab), `kill` discards a guest at once.
 - M7: shadow MMU for the 68040 and 68060 too. The amigaux.org 040/060
   AMIX kernel boots deprivileged to the login prompt in FS-UAE on both
   (`boot -pv unix_root:/stand/unix-040`); next is the Z3660 in its real

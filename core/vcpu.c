@@ -1221,6 +1221,7 @@ hypercall(struct excregs *r)
 	case HC_HALT:
 		guest.reboot = r->d[1] != 0;
 		guest.active = 0;
+		guest.kbd_break = !guest.reboot;	/* halted: console on screen */
 		stop_guest(r, guest.reboot ? "rebooting" : "halted", 0, 0);
 	case HC_EXIT:
 		guest.exit_code = (int)r->d[1];
@@ -1251,6 +1252,33 @@ poll_serial(struct excregs *r)
 		if (rxlen < sizeof(rxbuf))
 			rxbuf[(rxhead + rxlen++) % sizeof(rxbuf)] = (u8)c;
 	}
+}
+
+/*
+ * Injected call (vcpu_inject): what the CPU does for an interrupt, with the
+ * handler given: a format 0 frame on the guest's supervisor stack, virtual
+ * S and IPL 7, then pc. The handler's RTE returns where the guest was.
+ */
+static void
+inject(struct excregs *r)
+{
+	u16 old = cur_vsr(r);
+	u32 sp;
+
+	set_vsr(r, (u16)((old | VSR_S | VSR_IPL) & ~(VSR_T1 | VSR_T0)));
+	sp = r->a[7] - 8;
+	wr16(sp, old);
+	wr32(sp + 2, r->pc);
+	wr16(sp + 6, 0);
+	r->a[7] = sp;
+	r->pc = guest.inject_pc;
+	guest.inject_pc = 0;
+}
+
+void
+vcpu_inject(u32 pc)
+{
+	guest.inject_pc = pc;
 }
 
 void
@@ -1354,6 +1382,8 @@ vcpu_exception(struct excregs *r)
 		reflect(r, vec, 1, -1);
 	if (gdb_step)		/* an emulated or reflected instruction: one step */
 		stop_guest(r, "stepped", SIGTRAP, 0);
+	if (guest.inject_pc && !(guest.vsr & VSR_IPL))
+		inject(r);			/* not inside a critical section */
 	r->sr = real_sr(r);
 	vmmu_activate();			/* view of the new virtual S */
 }

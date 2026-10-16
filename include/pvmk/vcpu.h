@@ -62,6 +62,7 @@ struct vcpu {
 	int exit_code;
 	int reboot;			/* stopped asking to be booted again */
 	int kbd_break;			/* stopped from the Amiga keyboard */
+	u32 inject_pc;			/* call to inject (vcpu_inject), or 0 */
 	u32 stop_sig;			/* why it stopped (GDB signal number) */
 	int stop_swbreak;		/* ... at a GDB software breakpoint */
 	u32 n_emul, n_reflect, n_hcall, n_irq, n_idle;
@@ -77,6 +78,9 @@ void vcpu_start(const char *name, u32 pc, u32 ssp, u32 d0)
 void vcpu_prepare(const char *name, u32 pc, u32 ssp, u32 d0);	/* stopped */
 void vcpu_resume(void) __attribute__((noreturn));
 void vcpu_set_ps(u16 sr);		/* change the stopped guest's SR */
+/* Have the guest call pc like an interrupt handler (format 0 frame on its
+ * supervisor stack, IPL 7) as soon as it runs at interrupt level 0. */
+void vcpu_inject(u32 pc);
 void vcpu_show(void);
 void vcpu_stats(void);			/* profile ("guest stats") */
 void vcpu_spl_patching(u32 text, u32 size);	/* kernel text, 0: off */

@@ -227,6 +227,10 @@ relocate_rel(u8 *elf, u32 size, u32 base, struct amix_kernel *k)
 			want = &k->sf_fault;
 		else if (name_is(strtab, strsize, s->name, "haltsys"))
 			want = &k->haltsys;
+		else if (name_is(strtab, strsize, s->name, "psignal"))
+			want = &k->psignal;
+		else if (name_is(strtab, strsize, s->name, "proc_init"))
+			want = &k->proc_init;
 		else if (name_is(strtab, strsize, s->name, "LoadedCopList"))
 			want = &k->loadedcoplist;
 		else if (name_is(strtab, strsize, s->name, "ExecingCopList"))
@@ -398,15 +402,53 @@ patch_haltsys(u32 at)
 	return 1;
 }
 
-int
-amix_pv_patch(const struct amix_kernel *k)
-{
-	int n = patch_haltsys(k->haltsys);
+/*
+ * Clean shutdown on request: SORIX-LDOM injects a call of this trampoline
+ * into the guest like an interrupt; it sends SIGPWR to init, whose
+ * powerfail entry in /etc/inittab runs shutdown, which halts through
+ * HC_HALT. It lives in the rest of lcopyin, unused since its patch.
+ *
+ *	movem.l	d0-d1/a0-a1,-(sp)
+ *	pea	SIGPWR (19)
+ *	move.l	proc_init,-(sp)
+ *	jsr	psignal
+ *	addq.l	#8,sp
+ *	movem.l	(sp)+,d0-d1/a0-a1
+ *	rte
+ */
+#define SIGPWR		19
 
+static u32
+shutdown_trampoline(const struct amix_kernel *k)
+{
+	u16 *p = (u16 *)(uintptr_t)(k->lcopyin + 36);	/* after the stub */
+	u16 code[14] = {
+		0x48e7, 0xc0c0, 0x4878, SIGPWR,
+		0x2f39, (u16)(k->proc_init >> 16), (u16)k->proc_init,
+		0x4eb9, (u16)(k->psignal >> 16), (u16)k->psignal,
+		0x508f, 0x4cdf, 0x0303, 0x4e73,
+	};
+	u32 i;
+
+	if (!k->psignal || !k->proc_init)
+		return 0;
+	for (i = 0; i < 14; i++)
+		p[i] = code[i];
+	return k->lcopyin + 36;
+}
+
+int
+amix_pv_patch(struct amix_kernel *k)
+{
+	int n = patch_haltsys(k->haltsys), c;
+
+	k->shutdown_call = 0;
 	if (!k->sf_fault || !k->u)
 		return n;
-	return n + patch_copy(k->lcopyin, 0x0000, HC_COPYIN, k) +
-	    patch_copy(k->lcopyout, 0x0001, HC_COPYOUT, k);
+	c = patch_copy(k->lcopyin, 0x0000, HC_COPYIN, k);
+	if (c)				/* lcopyin's tail is free now */
+		k->shutdown_call = shutdown_trampoline(k);
+	return n + c + patch_copy(k->lcopyout, 0x0001, HC_COPYOUT, k);
 }
 
 int

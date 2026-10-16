@@ -335,6 +335,8 @@ def test_one(cpu, adf, hdf, ctrl="scsi", amix_hdf=None):
                 amiga.expect(re.escape(PROMPT), 10)
                 shell("guest log", rb"Available Unix  memory = \d+")
                 shell("guest", rb"shadow MMU: \d+ fills")
+                shell("kill", rb"kill: amix discarded")
+                shell("guest", rb"guest amix: exited")
     except TimeoutError as e:
         tail = (amiga.buf or b"")[-600:].decode("latin-1")
         print(f"uae.py test: {cpu} {ctrl}: FAIL at '{step}' waiting for {e} "
