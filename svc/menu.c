@@ -155,8 +155,6 @@ menu_is_default(const char *target)
 static int
 entry_pv(const struct mentry *e)
 {
-	if (e->amigaos)
-		return 0;
 	return e->mode == ENTRY_PV ? 1 : e->mode == ENTRY_NATIVE ? 0 : amix_pv;
 }
 
@@ -169,10 +167,10 @@ draw(int def)
 	    cpuinfo.model, cpuinfo.mmu_ok ? "MMU ok" : "no MMU: native only");
 	for (i = 0; i < nents; i++)
 		kprintf("  %u  %-9s %-34s %s%s\n", i + 1, ents[i].label,
-		    ents[i].target, ents[i].amigaos ? "" : entry_pv(&ents[i]) ?
-		    "deprivileged" : "native", (int)i == def ? "  [default]" : "");
+		    ents[i].target, entry_pv(&ents[i]) ? "deprivileged" :
+		    "native", (int)i == def ? "  [default]" : "");
 	kprintf("  k  choose a kernel on an AMIX root\n");
-	kprintf("  m  AMIX mode: %s (m toggles)\n", amix_pv ? "deprivileged" :
+	kprintf("  m  mode: %s (m toggles)\n", amix_pv ? "deprivileged" :
 	    "native");
 	kprintf("  s  " SORIX_NAME " shell\n");
 	kprintf("  r  reboot\n\n");
@@ -189,7 +187,7 @@ boot_entry(const struct mentry *e)
 		pv = 0;
 	}
 	kprintf("menu: booting %s %s%s\n", e->label, e->target,
-	    e->amigaos ? "" : pv ? " (deprivileged)" : " (native)");
+	    pv ? " (deprivileged)" : " (native)");
 	if (boot_target(e->target, pv, 0) != BOOT_ENOTFIT)
 		return;
 	kprintf("Boot it anyway (y/n)? ");

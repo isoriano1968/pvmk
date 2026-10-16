@@ -18,6 +18,7 @@
  * an interrupt that arrives can always be delivered.
  */
 #include "pvmk/amiga.h"
+#include "pvmk/bootcap.h"
 #include "pvmk/gdb.h"
 #include "pvmk/kprintf.h"
 #include "pvmk/log.h"
@@ -577,11 +578,83 @@ kbd_snoop(struct excregs *r)
  * (Ctrl-C breaks in); the CPU goes back to sleep after it. With all
  * levels masked nothing could wake it, so the guest simply continues.
  */
+/*
+ * AmigaOS guest: Kickstart sizes the A3000's RAM itself and counts
+ * SORIX-LDOM's hole as free memory. At its first idle STOP (no task runs,
+ * exec's lists are consistent, and nothing is allocated at the top of
+ * RAM yet: exec allocates from the bottom) the hole is taken out of the
+ * free list of the MemHeader holding it, as AllocAbs would, and the
+ * header's upper bound lowered if the hole ends it.
+ */
+#define KEB_CHKBASE	38		/* ExecBase */
+#define KEB_MEMLIST	322
+#define MH_ATTR		14
+#define MH_FIRST	16
+#define MH_LOWER	20
+#define MH_UPPER	24
+#define MH_FREE		28
+
+static u32
+pk32(u32 a)
+{
+	__asm__("" : "+d"(a));		/* any address, also ExecBase's at 4 */
+	return *(volatile u32 *)(uintptr_t)a;
+}
+
+static void
+po32(u32 a, u32 v)
+{
+	__asm__("" : "+d"(a));
+	*(volatile u32 *)(uintptr_t)a = v;
+}
+
+static void
+kick_carve(void)
+{
+	u32 eb = pk32(4), mh, c, prev, n, hb = bootcap.hole_base;
+	u32 ht = bootcap.hole_top;
+
+	if ((eb & 1) || eb >= 0x10000000 || pk32(eb + KEB_CHKBASE) != ~eb)
+		return;				/* exec not up yet */
+	guest.carved = 1;
+	for (mh = pk32(eb + KEB_MEMLIST); pk32(mh); mh = pk32(mh)) {
+		if (pk32(mh + MH_LOWER) > hb || pk32(mh + MH_UPPER) < ht)
+			continue;
+		for (prev = mh + MH_FIRST, c = pk32(prev); c;
+		    prev = c, c = pk32(c)) {
+			n = pk32(c + 4);
+			if (c > hb || c + n < ht)
+				continue;
+			/* c holds the whole hole: [c, hb) stays, [ht, c+n) too */
+			if (c + n > ht) {
+				po32(ht, pk32(c));
+				po32(ht + 4, c + n - ht);
+				po32(c, ht);
+			}
+			if (hb > c)
+				po32(c + 4, hb - c);
+			else
+				po32(prev, pk32(c));	/* nothing left before */
+			po32(mh + MH_FREE, pk32(mh + MH_FREE) - (ht - hb));
+			if (pk32(mh + MH_UPPER) == ht)
+				po32(mh + MH_UPPER, hb);
+			kprintf("vcpu: %08x-%08x taken out of AmigaOS's free memory\n",
+			    hb, ht - 1);
+			return;
+		}
+		kprintf("vcpu: warning: SORIX-LDOM's memory %08x-%08x is not free "
+		    "in AmigaOS's list\n", hb, ht - 1);
+		return;
+	}
+}
+
 static void
 idle(struct excregs *r)
 {
 	u32 level = (guest.vsr & VSR_IPL) >> 8, vec, s0, ms0, s1, ms1;
 
+	if (guest.reset_is_hw && !guest.carved)
+		kick_carve();
 	if (level >= 7)
 		return;
 	time_now(&s0, &ms0);
@@ -644,8 +717,15 @@ movec(struct excregs *r, u16 op, u32 *pc)
 		p = &r->a[7];
 	if (to_cr) {
 		*p = *rn;
-		if (cr == 0x002 && (*rn & 0x0808))	/* 030 cache clear bits */
-			cache_push_all(cpuinfo.model);
+		if (cr == 0x002) {
+			if (m <= 30 && (*rn & 0x0808))	/* 030 cache clear bits */
+				cache_push_all(cpuinfo.model);
+			/* only the bits the CPU has read back (CPU detection
+			 * relies on it): 030 EI FI IBE ED FD DBE WA; 040 DE IE;
+			 * 060 EDC NAD ESB DPI FOC EBC EIC NAI FIC */
+			*p &= m <= 30 ? 0x3313 : m == 40 ? 0x80008000 :
+			    0xf880e000;
+		}
 		if (m >= 40 && cr == 0x806) {	/* new user address space */
 			vmmu_flush_user();
 			crp_next = *pc;
@@ -811,6 +891,8 @@ fsave_frestore(struct excregs *r, u16 op, u32 *pc)
 
 	if (cpuinfo.fpu < 0 && cpuinfo.model != 60)
 		return FAULT;
+	if (cpuinfo.model == 60 && (guest.pcr & 2))
+		return FAULT;		/* 68060 FPU disabled (DFP): line F */
 	if (!(op & 0x0040)) {			/* FSAVE <ea>: -(An) or control */
 		if (r->pc == null_pc && guest_events() == null_events + 1) {
 			memset(buf, 0, 4);
@@ -1053,6 +1135,16 @@ emulate(struct excregs *r)
 		guest.n_emul++;
 		idle(r);
 		return 0;
+	} else if (op == 0x4e70 && guest.reset_is_hw) {
+		/*
+		 * RESET for a Kickstart guest: what the reset line does to
+		 * the custom chips (interrupts, requests and DMA off); the
+		 * guest then initialises the rest itself.
+		 */
+		REG16(CUSTOM_INTENA) = 0x7fff;
+		REG16(CUSTOM_INTREQ) = 0x7fff;
+		REG16(0xdff096) = 0x7fff;		/* DMACON */
+		guest.carved = 0;		/* a reboot: memory lists anew */
 	} else if (op == 0x4e70) {		/* RESET: the guest reboots */
 		guest.reboot = 1;
 		guest.active = 0;
@@ -1335,8 +1427,9 @@ vcpu_exception(struct excregs *r)
 			guest.isp = isp;
 			guest.msp = msp;
 			access_fault(r);
-		} else if (k)
-			reflect(r, VEC_ILLEGAL, 0, -1);
+		} else if (k)		/* as the CPU would: line F for 0xFxxx */
+			reflect(r, (rd16(r->pc) & 0xf000) == 0xf000 ? 11 :
+			    VEC_ILLEGAL, 0, -1);
 	} else if (vec == VEC_TRAP15 && (guest.vsr & VSR_S)) {
 		hypercall(r);				/* PC is past the TRAP */
 	} else if (vec == VEC_LINEA && aline(r)) {

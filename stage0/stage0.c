@@ -55,6 +55,7 @@ struct takeover_args {
 };
 
 u32 lib_call(void *base, s32 lvo, u32 d0, u32 d1, u32 a0, u32 a1);
+u32 sorix_guest(void *sysbase);		/* libcall.S: 'SORX' under SORIX-LDOM */
 void takeover(const struct takeover_args *ta, void *sysbase)
     __attribute__((noreturn));
 int stage0_main(void *sysbase, void *ioreq, u32 medium, u32 baud, u8 *base);
@@ -608,6 +609,21 @@ stage0_main(void *sysbase, void *ioreq, u32 medium, u32 baud, u8 *base)
 		kprintf("\n" SORIX_NAME ": left mouse button held, "
 		    "continuing AmigaOS boot\n");
 		return 0;
+	}
+
+	/*
+	 * Booted by an AmigaOS that itself runs as a guest of SORIX-LDOM (the
+	 * AmigaOS personality): not again; the floppy is declined and
+	 * Kickstart boots from the next device.
+	 */
+	if (sorix_guest(sysbase) == 0x534f5258) {
+		kprintf("\n" SORIX_NAME ": this AmigaOS runs under SORIX-LDOM; "
+		    "declining the floppy, it boots from the next device\n");
+		PEEK16(ioreq, IO_COMMAND) = TD_MOTOR;
+		PEEK32(ioreq, IO_LENGTH) = 0;
+		lib_call(sysbase, LVO_DoIO, 0, 0, 0, (u32)(uintptr_t)ioreq);
+		silence_boot_alert(sysbase);
+		return BOOTBLOCK_DECLINE;
 	}
 
 	conf_defaults(&bootcap.conf);

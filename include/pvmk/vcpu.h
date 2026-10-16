@@ -63,6 +63,8 @@ struct vcpu {
 	int reboot;			/* stopped asking to be booted again */
 	int kbd_break;			/* stopped from the Amiga keyboard */
 	u32 inject_pc;			/* call to inject (vcpu_inject), or 0 */
+	int reset_is_hw;		/* RESET resets the chips (Kickstart) */
+	int carved;			/* Kickstart: hole taken out of its memory */
 	u32 stop_sig;			/* why it stopped (GDB signal number) */
 	int stop_swbreak;		/* ... at a GDB software breakpoint */
 	u32 n_emul, n_reflect, n_hcall, n_irq, n_idle;

@@ -763,6 +763,32 @@ T1, continue, detach, kill, noack, guest console as `O` packets); `make test`
 drives gdb-multiarch against pvtest on 030/040/060. Not yet: stub for pvmk
 itself, `$`-packet auto switch, `monitor` commands, watchpoints.
 M3 complete in FS-UAE; real-A3000 confirmation pending.
+M8 in progress (FS-UAE, 68030): AmigaOS as a guest. `kick` (or the
+boot menu's AmigaOS entry, or `boot -pv dh0`) starts Kickstart from the
+ROM at its reset entry, deprivileged; RESET resets the custom chips
+(interrupts, requests, DMA) instead of meaning a reboot, so AmigaOS's own
+reboot runs inside the guest. Kickstart sizes the A3000's RAM itself
+(without touching SORIX-LDOM's hole) and counts the hole as free: at its
+first idle STOP, when exec's lists are consistent and nothing is
+allocated at the top of RAM, SORIX-LDOM takes the hole out of the free
+list of the MemHeader holding it (as AllocAbs) and lowers its upper
+bound; after a guest reboot again. AmigaOS then boots from the floppy,
+i.e. SORIX-LDOM's: stage0 recognises that it runs under SORIX-LDOM
+(through exec Supervisor(), TRAP #15 is the HC_VERSION hypercall, which
+natively goes to a handler installed for that one call) and declines the
+floppy, so Kickstart continues with the next boot device. Result:
+AmigaOS 3.2 boots to its CLI from DH0 in FS-UAE on the 68030, 68040 and
+68060, without guest faults, idle ~99% of the time; Ctrl-C, keyboard
+break-in (resume restores GfxBase->LOFlist), `kill`. Needed for
+Kickstart's CPU detection: MOVEC CACR keeps only the bits the real CPU
+has (it reads back CACR to tell the 68030 from the 68040/68060); an
+F-line instruction the CPU does not have is reflected as line F, not as
+illegal; on the 68060 with the FPU disabled (PCR DFP) FSAVE/FRESTORE
+raise line F for the guest. Known limit: `kill` in the middle of a guest's
+SCSI transfer can leave the target holding the bus (the WD33C93A cannot
+reset the SCSI bus). Open: Workbench and applications, the
+68040/68060 libraries (MMU and cache calls), SuperKickstart RAM, real
+A3000.
 Ending a guest from SORIX-LDOM: `shutdown` asks AMIX to shut down
 cleanly. SORIX-LDOM injects a call into the guest like an interrupt (a
 format 0 frame on its supervisor stack, IPL 7) as soon as it runs at

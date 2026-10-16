@@ -305,6 +305,20 @@ def test_one(cpu, adf, hdf, ctrl="scsi", amix_hdf=None):
                 shell("ls unix_root:/stand", rb"-rw-r--r-- +1475144 +unix")
                 shell("ls unix_root:/", rb"unix -> stand/unix")
                 shell("cat unix_root:/etc/vfstab", rb"c6d0s1\t/\tufs")
+            if not amix_hdf:
+                # AmigaOS as a guest (M8): Kickstart from the ROM; the
+                # nested floppy boot declines; SORIX-LDOM's memory is
+                # taken out of AmigaOS's free list; then kill it. (With
+                # the AMIX disk, Kickstart would boot its UNIX_Boot.)
+                step = "kick"
+                amiga.send(b"kick\r")
+                amiga.expect(rb"taken out of AmigaOS's free memory", 60)
+                amiga.expect(rb"declining the floppy", 60)
+                time.sleep(10)
+                amiga.send(b"\x03")
+                amiga.expect(rb"amigaos stopped \(Ctrl-C\)", 20)
+                amiga.expect(re.escape(PROMPT), 10)
+                shell("kill", rb"kill: amigaos discarded")
             if ctrl == "scsi":
                 shell("ls dh0:s", rb"startup-sequence +70")
             else:

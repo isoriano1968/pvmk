@@ -212,6 +212,7 @@ struct cmd {
 
 static void cmd_help(int argc, char **argv);
 static void cmd_reset(int argc, char **argv);
+static void cmd_kick(int argc, char **argv);
 
 static void
 cmd_ver(int argc, char **argv)
@@ -897,6 +898,34 @@ screen_take(void)
 		kprintf("SORIX-LDOM console (guest %s has ended)\n", guest.name);
 }
 
+/*
+ * AmigaOS: the copper list on display is GfxBase->LOFlist (+0x32), found
+ * through exec's library list (ExecBase +378) by name.
+ */
+static u32
+amigaos_copper(void)
+{
+	volatile u32 *low = (volatile u32 *)(uintptr_t)4;
+	u32 eb, n, name, i;
+
+	__asm__("" : "+a"(low));
+	eb = *low;
+	if ((eb & 1) || eb >= 0x10000000)
+		return 0;
+	for (n = *(volatile u32 *)(uintptr_t)(eb + 378); n &&
+	    *(volatile u32 *)(uintptr_t)n; n = *(volatile u32 *)(uintptr_t)n) {
+		name = *(volatile u32 *)(uintptr_t)(n + 10);
+		for (i = 0; name && "graphics.library"[i] &&
+		    *(volatile char *)(uintptr_t)(name + i) == "graphics.library"[i];
+		    i++)
+			;
+		if (name && !"graphics.library"[i] &&
+		    !*(volatile char *)(uintptr_t)(name + i))
+			return *(volatile u32 *)(uintptr_t)(n + 0x32);
+	}
+	return 0;
+}
+
 static void
 screen_give(void)
 {
@@ -906,14 +935,18 @@ screen_give(void)
 		return;
 	display_off();
 	memcpy((void *)(uintptr_t)bootcap.disp_chip, disp_save, DISP_CHIP_SIZE);
-	if (amixk.execingcoplist)
-		cl = *(volatile u32 *)(uintptr_t)amixk.execingcoplist;
-	if (!cl && amixk.loadedcoplist)
-		cl = *(volatile u32 *)(uintptr_t)amixk.loadedcoplist;
-	if (cl) {
-		cop = *(volatile u32 *)(uintptr_t)(cl + 12);
-		if (!cop)
-			cop = *(volatile u32 *)(uintptr_t)(cl + 8);
+	if (guest.reset_is_hw)
+		cop = amigaos_copper();
+	else {
+		if (amixk.execingcoplist)
+			cl = *(volatile u32 *)(uintptr_t)amixk.execingcoplist;
+		if (!cl && amixk.loadedcoplist)
+			cl = *(volatile u32 *)(uintptr_t)amixk.loadedcoplist;
+		if (cl) {
+			cop = *(volatile u32 *)(uintptr_t)(cl + 12);
+			if (!cop)
+				cop = *(volatile u32 *)(uintptr_t)(cl + 8);
+		}
 	}
 	if (cop) {
 		*(volatile u32 *)0xdff080 = cop;	/* COP1LC */
@@ -1143,6 +1176,12 @@ boot_target(const char *what, int pv, int force)
 		withcolon[n + 1] = 0;
 		what = withcolon;
 	}
+	if (dostype_is_amigaos(p->dostype) && pv) {
+		kprintf("boot: AmigaOS deprivileged; Kickstart chooses the boot "
+		    "device by its priorities (%s requested)\n", p->name);
+		cmd_kick(0, NULL);
+		return -1;
+	}
 	if (dostype_is_amigaos(p->dostype)) {
 		/*
 		 * Kickstart boots AmigaOS partitions after the floppy declines.
@@ -1308,6 +1347,36 @@ cmd_menu(int argc, char **argv)
 	menu_run(NULL);
 }
 
+/*
+ * AmigaOS as a guest (M8, exploration): Kickstart from the ROM, entered at
+ * its reset entry (ROM + 4) deprivileged, with interrupts, DMA and the
+ * screen off as after a reset; RESET resets the chips instead of
+ * meaning a reboot.
+ */
+static void
+cmd_kick(int argc, char **argv)
+{
+	u32 entry;
+
+	(void)argc;
+	(void)argv;
+	if (!cpuinfo.mmu_ok) {
+		kprintf("kick: needs a working MMU\n");
+		return;
+	}
+	entry = *(volatile u32 *)(uintptr_t)(bootcap.kick_base + 4);
+	kprintf("kick: Kickstart %u.%u at %08x, entry %08x, deprivileged\n",
+	    bootcap.kick_ver, bootcap.kick_rev, bootcap.kick_base, entry);
+	REG16(CUSTOM_INTENA) = 0x7fff;
+	REG16(CUSTOM_INTREQ) = 0x7fff;
+	REG16(0xdff096) = 0x7fff;
+	display_off();
+	screen_taken = 0;
+	vcpu_prepare("amigaos", entry, 0x400, 0);
+	guest.reset_is_hw = 1;
+	vcpu_resume();
+}
+
 static void
 cmd_reset(int argc, char **argv)
 {
@@ -1346,6 +1415,7 @@ static const struct cmd cmds[] = {
 	{ "resume", "",                 "continue the stopped guest", cmd_resume },
 	{ "shutdown", "",               "shut the guest down cleanly (AMIX)", cmd_shutdown },
 	{ "kill",  "",                  "discard the guest (hard stop)", cmd_kill },
+	{ "kick",  "",                  "AmigaOS from the Kickstart ROM, deprivileged (M8, experimental)", cmd_kick },
 	{ "watch", "[addr]",            "log guest writes to addr (shadow MMU)", cmd_watch },
 	{ "pt",    "<addr> [u]",        "guest page table walk (u: user view)", cmd_pt },
 	{ "reset", "",                  "reboot into Kickstart", cmd_reset },

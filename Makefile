@@ -39,7 +39,7 @@ HOSTCFLAGS	:= -O2 -Wall -Wextra -Iinclude
 
 # Size budgets (bytes), see PLAN.md section 10.
 BUDGET_BOOTBLOCK := 960
-BUDGET_IMAGE	 := 98304
+BUDGET_IMAGE	:= 131072
 
 PVMK_OBJS	:= $(B)/stage0/entry.o $(B)/stage0/stage0.o $(B)/stage0/libcall.o \
 		   $(B)/stage0/takeover.o $(B)/stage0/alertpatch.o $(B)/core/stage1.o $(B)/core/vectors.o \
