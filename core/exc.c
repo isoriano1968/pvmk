@@ -76,7 +76,7 @@ exception(struct excregs *r)
 	}
 	if (guest.running && (r->sr & 0x2000) && vec >= 25 && vec <= 31) {
 		/*
-		 * An interrupt for the guest taken in SORIX-LDOM: the guest
+		 * An interrupt for the guest taken in SORIX-ILOM-LDOM: the guest
 		 * trapped at an interrupt level below it and the interrupt
 		 * came in before exc_entry masked them. Keep it pending; it is
 		 * taken again when the guest runs.

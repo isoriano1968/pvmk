@@ -4,7 +4,7 @@
  * The guest always runs in real user mode. Its virtual supervisor state is
  * vsr (system byte; the condition codes stay in the real SR), and while it
  * is in virtual supervisor mode the real USP holds its supervisor stack
- * pointer. Every exception the guest causes enters SORIX-LDOM:
+ * pointer. Every exception the guest causes enters SORIX-ILOM-LDOM:
  *
  *  - privilege violation in virtual supervisor mode: the instruction is
  *    emulated against the virtual registers;
@@ -50,7 +50,7 @@ stop_guest(struct excregs *r, const char *why, u32 sig, int swbreak)
     __attribute__((noreturn));
 
 /*
- * Guest memory, as SORIX-LDOM touches it on the guest's behalf (decoding,
+ * Guest memory, as SORIX-ILOM-LDOM touches it on the guest's behalf (decoding,
  * frames, MOVES): guest virtual addresses, translated through the guest's
  * tables in the current view (kernel view while virtual S = 1, or the
  * view a MOVES function code selects).
@@ -537,7 +537,7 @@ static void poll_serial(struct excregs *r);
 
 /*
  * Break-in from the Amiga keyboard: Ctrl + Left Amiga + Help. The keyboard
- * belongs to the guest; on each level 2 interrupt SORIX-LDOM only looks
+ * belongs to the guest; on each level 2 interrupt SORIX-ILOM-LDOM only looks
  * at CIA-A's serial data register (reading it clears nothing), so the
  * guest still gets every key.
  */
@@ -574,13 +574,13 @@ kbd_snoop(struct excregs *r)
 /*
  * The guest waits for an interrupt (STOP, HC_IDLE): stop the real CPU at
  * the guest's interrupt level until an interrupt it has not masked
- * arrives, then deliver that interrupt. Serial input is SORIX-LDOM's
+ * arrives, then deliver that interrupt. Serial input is SORIX-ILOM-LDOM's
  * (Ctrl-C breaks in); the CPU goes back to sleep after it. With all
  * levels masked nothing could wake it, so the guest simply continues.
  */
 /*
  * AmigaOS guest: Kickstart sizes the A3000's RAM itself and counts
- * SORIX-LDOM's hole as free memory. At its first idle STOP (no task runs,
+ * SORIX-ILOM-LDOM's hole as free memory. At its first idle STOP (no task runs,
  * exec's lists are consistent, and nothing is allocated at the top of
  * RAM yet: exec allocates from the bottom) the hole is taken out of the
  * free list of the MemHeader holding it, as AllocAbs would, and the
@@ -642,7 +642,7 @@ kick_carve(void)
 			    hb, ht - 1);
 			return;
 		}
-		kprintf("vcpu: warning: SORIX-LDOM's memory %08x-%08x is not free "
+		kprintf("vcpu: warning: SORIX-ILOM-LDOM's memory %08x-%08x is not free "
 		    "in AmigaOS's list\n", hb, ht - 1);
 		return;
 	}
@@ -1328,7 +1328,7 @@ hypercall(struct excregs *r)
 }
 
 /*
- * Serial input while the guest runs belongs to SORIX-LDOM: Ctrl-C breaks
+ * Serial input while the guest runs belongs to SORIX-ILOM-LDOM: Ctrl-C breaks
  * into the shell, anything else is kept for HC_GETC. Checked on the serial
  * receive interrupt and on every other entry from the guest, so a guest
  * running with interrupts masked can still be stopped whenever it traps.

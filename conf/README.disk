@@ -1,7 +1,7 @@
-SORIX-LDOM boot disk
+SORIX-ILOM-LDOM boot disk
 ====================
 
-This floppy boots the SORIX-LDOM (pvmk) microkernel on an Amiga 3000 (68030/040/060).
+This floppy boots the SORIX-ILOM-LDOM (pvmk) microkernel on an Amiga 3000 (68030/040/060).
 Connect the serial port (115200 8N1) to see the boot log.
 
   pvmk       microkernel image. Do not modify: the boot block loads it

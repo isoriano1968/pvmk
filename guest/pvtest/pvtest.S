@@ -1,9 +1,9 @@
 /*
- * pvtest — conformance test guest for the SORIX-LDOM virtual CPU.
+ * pvtest — conformance test guest for the SORIX-ILOM-LDOM virtual CPU.
  *
  * Runs deprivileged (real user mode) as if it were a kernel in supervisor
  * mode, linked at PVTEST_BASE. Every privileged instruction below traps to
- * SORIX-LDOM and is emulated; exceptions come back through pvtest's own
+ * SORIX-ILOM-LDOM and is emulated; exceptions come back through pvtest's own
  * vector table. Results go to the console through hypercalls; the guest
  * exits with D1 = number of failures. Entered with D0 = 1 it then keeps
  * printing dots forever (for break-in/resume tests).

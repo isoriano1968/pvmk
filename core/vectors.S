@@ -106,7 +106,7 @@ cold_reboot:
  * Line A (vector 10): fast path for the guest kernel's patched spl sites
  * (A10n, A11n, A120, A13n; see aline() in vcpu.c, which also handles
  * everything this leaves to exc_entry). Kernel text is identity mapped,
- * so the opcode is read through SORIX-LDOM's own (physical) view. An
+ * so the opcode is read through SORIX-ILOM-LDOM's own (physical) view. An
  * interrupt arriving here is left pending by exception() (it raises the
  * interrupted SR to IPL 7) and taken when the guest runs again.
  */
@@ -114,7 +114,7 @@ cold_reboot:
 aline_entry:
 	tst.l	aline_fast
 	beq	exc_entry
-	btst	#5,(%sp)		/* from SORIX-LDOM itself */
+	btst	#5,(%sp)		/* from SORIX-ILOM-LDOM itself */
 	bne	exc_entry
 	tst.b	(%sp)			/* T1: tracing (GDB, watchpoint) */
 	bmi	exc_entry

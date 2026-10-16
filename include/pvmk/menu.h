@@ -4,7 +4,7 @@
  * (entry=label,dev:path[,pv|native]) or, without any, one per AMIX root
  * partition (/stand/unix) and the AmigaOS partition Kickstart would boot;
  * a kernel chooser for /stand on the AMIX roots; deprivileged or native;
- * the SORIX-LDOM shell; reboot.
+ * the SORIX-ILOM-LDOM shell; reboot.
  */
 #ifndef PVMK_MENU_H
 #define PVMK_MENU_H

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run SORIX-LDOM in FS-UAE as an Amiga 3000, serial port on a pseudo-terminal.
+"""Run SORIX-ILOM-LDOM in FS-UAE as an Amiga 3000, serial port on a pseudo-terminal.
 
   uae.py run  [--cpu 030|040|060] [--adf FILE]
       Interactive console in this terminal. Ctrl-] quits (and stops FS-UAE).
@@ -34,7 +34,7 @@ CPU_OPTS = {
     "040": ["--cpu=68040", "--fpu=68040", "--uae_mmu_model=68040"],
     "060": ["--cpu=68060", "--fpu=68060", "--uae_mmu_model=68060"],
 }
-PROMPT = b"SORIX-LDOM> "
+PROMPT = b"SORIX-ILOM-LDOM> "
 
 
 def to_shell(amiga, timeout):
@@ -252,7 +252,7 @@ def test_one(cpu, adf, hdf, ctrl="scsi", amix_hdf=None):
             amiga.expect(rb"Select: ", 15)
         amiga.send(b"s")
         amiga.expect(re.escape(PROMPT), 15)
-        shell("ver", rb"SORIX-LDOM \S+, boot 1,")
+        shell("ver", rb"SORIX-ILOM-LDOM \S+, boot 1,")
         shell("help", rb"sload")
         shell("conf", rb"from DF0:pvmk\.conf[\s\S]*baud=115200")
         shell("ls", rb"pvmk\.conf")
@@ -307,7 +307,7 @@ def test_one(cpu, adf, hdf, ctrl="scsi", amix_hdf=None):
                 shell("cat unix_root:/etc/vfstab", rb"c6d0s1\t/\tufs")
             if not amix_hdf:
                 # AmigaOS as a guest (M8): Kickstart from the ROM; the
-                # nested floppy boot declines; SORIX-LDOM's memory is
+                # nested floppy boot declines; SORIX-ILOM-LDOM's memory is
                 # taken out of AmigaOS's free list; then kill it. (With
                 # the AMIX disk, Kickstart would boot its UNIX_Boot.)
                 step = "kick"
@@ -320,7 +320,7 @@ def test_one(cpu, adf, hdf, ctrl="scsi", amix_hdf=None):
                 amiga.expect(re.escape(PROMPT), 10)
                 shell("kill", rb"kill: amigaos discarded")
             if ctrl == "scsi":
-                shell("ls dh0:s", rb"startup-sequence +70")
+                shell("ls dh0:s", rb"startup-sequence +75")
             else:
                 shell("ls dh0:s", rb"which has no native driver")
             if amix_hdf:

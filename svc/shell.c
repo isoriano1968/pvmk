@@ -312,7 +312,7 @@ dev_path(const char *cmd, const char *arg, const char **path)
 	}
 	if (p->native == NATIVE_NONE) {
 		kprintf("%s: %s is on %s unit %u, which has no native driver; after "
-		    "takeover SORIX-LDOM reads disks on the A3000 internal SCSI "
+		    "takeover SORIX-ILOM-LDOM reads disks on the A3000 internal SCSI "
 		    "and the Z3660\n", cmd, p->name, p->device, p->unit);
 		return NULL;
 	}
@@ -610,7 +610,7 @@ static u8 *amix_image;			/* relocated ELF file, or NULL */
 
 /*
  * Load and relocate an AMIX kernel from dev:path (default path
- * /stand/unix). The file goes just below the SORIX-LDOM hole; the kernel
+ * /stand/unix). The file goes just below the SORIX-ILOM-LDOM hole; the kernel
  * will be copied to the start of the largest fast RAM region.
  */
 static int
@@ -684,7 +684,7 @@ amix_load(const char *arg)
 
 /*
  * Deprivileged AMIX start: the kernel runs as a guest of the virtual CPU.
- * Its memory list ends below SORIX-LDOM's hole; the screen console stops
+ * Its memory list ends below SORIX-ILOM-LDOM's hole; the screen console stops
  * (AMIX owns chip RAM, where the display and the SCSI bounce buffer are).
  */
 static void
@@ -700,7 +700,7 @@ amix_start_pv(struct amix_bootinfo *bi, u32 sp)
 		if (lo <= bootcap.hole_base && bootcap.hole_base < up) {
 			*(u32 *)(mh + MH_UPPER) = bootcap.hole_base;
 			*(u32 *)(mh + MH_FREE) = bootcap.hole_base - lo;
-			kprintf("boot: AMIX memory %08x-%08x (SORIX-LDOM above)\n",
+			kprintf("boot: AMIX memory %08x-%08x (SORIX-ILOM-LDOM above)\n",
 			    lo, bootcap.hole_base - 1);
 		}
 	}
@@ -732,7 +732,7 @@ amix_start_pv(struct amix_bootinfo *bi, u32 sp)
 
 /*
  * AMIX start (boot method 3). Native: the kernel gets the whole machine.
- * pv: it runs deprivileged under SORIX-LDOM. bootinfo, the handoff
+ * pv: it runs deprivileged under SORIX-ILOM-LDOM. bootinfo, the handoff
  * parameters and the initial stack live in the SCSI bounce buffer in chip
  * RAM, which nothing needs any more.
  */
@@ -778,7 +778,7 @@ amix_start(int pv)
 		    (amixk.cputype - amixk.bd.dvaddr)) = cpuinfo.model;
 	vmmu_off();
 	kprintf("boot: starting AMIX natively at %08x (D0=3, D1=%p): it gets "
-	    "the whole machine, SORIX-LDOM is gone until the next reset\n",
+	    "the whole machine, SORIX-ILOM-LDOM is gone until the next reset\n",
 	    h->entry, bi);
 	con_interactive(0);
 	while (!(REG16(SERDATR) & (1 << SERDATR_TSRE)))
@@ -872,7 +872,7 @@ cmd_gdb(int argc, char **argv)
 
 /*
  * The screen while a guest that owns it is stopped from the keyboard:
- * SORIX-LDOM's console comes back on its chip RAM block, which the guest
+ * SORIX-ILOM-LDOM's console comes back on its chip RAM block, which the guest
  * may be using, so the block and the DMA enables are saved first and
  * given back on resume, with the guest's copper list (AMIX: the view in
  * ExecingCopList, or one just loaded in LoadedCopList; the copper program
@@ -892,10 +892,10 @@ screen_take(void)
 	kbd_init((int)bootcap.conf.keymap);
 	screen_taken = 1;
 	if (guest.active)
-		kprintf("SORIX-LDOM console (guest %s stopped; resume to go "
+		kprintf("SORIX-ILOM-LDOM console (guest %s stopped; resume to go "
 		    "back)\n", guest.name);
 	else
-		kprintf("SORIX-LDOM console (guest %s has ended)\n", guest.name);
+		kprintf("SORIX-ILOM-LDOM console (guest %s has ended)\n", guest.name);
 }
 
 /*
@@ -984,7 +984,7 @@ cmd_shutdown(int argc, char **argv)
 	vcpu_resume();
 }
 
-/* Hard stop: the guest is discarded; SORIX-LDOM takes the machine back. */
+/* Hard stop: the guest is discarded; SORIX-ILOM-LDOM takes the machine back. */
 static void
 cmd_kill(int argc, char **argv)
 {
@@ -1187,7 +1187,7 @@ boot_target(const char *what, int pv, int force)
 		 * Kickstart boots AmigaOS partitions after the floppy declines.
 		 * (Not boot-block partitions such as AMIX's UNIX_Boot: its boot1
 		 * does not start after a declined floppy boot; AMIX is loaded by
-		 * SORIX-LDOM itself from its root file system, M2.)
+		 * SORIX-ILOM-LDOM itself from its root file system, M2.)
 		 */
 		const char *next = next_boot_device();
 

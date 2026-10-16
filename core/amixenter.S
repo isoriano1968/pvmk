@@ -2,7 +2,7 @@
  * void amix_enter(const struct amix_handoff *h)   -- does not return
  *
  * Final step of a native AMIX boot, like AMIX's copyit.s: with interrupts,
- * DMA and the MMU off (SORIX-LDOM keeps them that way after takeover),
+ * DMA and the MMU off (SORIX-ILOM-LDOM keeps them that way after takeover),
  * copy .text, .rodata and .data from the loaded image to their final
  * addresses, make the instruction cache forget the old memory contents,
  * and jump to the kernel with D0 = 3 (EXEC1) and D1 = &bootinfo. The

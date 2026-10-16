@@ -185,7 +185,7 @@ mmu030_off:
  * 68040/68060 MMU for the shadow tables (MOVEC and PFLUSHA as .short).
  *
  * void mmu040_load(u32 urp, u32 tc, u32 dtt0, u32 dtt1, u32 itt0)
- * SORIX-LDOM's transparent translation first, then the root and TC.
+ * SORIX-ILOM-LDOM's transparent translation first, then the root and TC.
  */
 	.globl	mmu040_load, mmu040_root, mmu040_flush, mmu040_off
 mmu040_load:

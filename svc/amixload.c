@@ -1,5 +1,5 @@
 /*
- * AMIX kernel relocation (written for SORIX-LDOM after the rules of
+ * AMIX kernel relocation (written for SORIX-ILOM-LDOM after the rules of
  * AMIX's amiga/boot/rel.c and bind.c, which define the boot/kernel
  * contract):
  *
@@ -377,7 +377,7 @@ patch_copy(u32 at, u16 movec_cr, u32 hc, const struct amix_kernel *k)
 
 /*
  * PV patch: haltsys(thenwhat) (amiga/kernel/servant.s) switches the MMU
- * off and RESETs or spins with interrupts off. Under SORIX-LDOM it
+ * off and RESETs or spins with interrupts off. Under SORIX-ILOM-LDOM it
  * becomes HC_HALT: the guest stops (halt) or is booted again (reboot).
  *
  *	move.l	4(sp),d1		0 halt, 1 reboot
@@ -403,7 +403,7 @@ patch_haltsys(u32 at)
 }
 
 /*
- * Clean shutdown on request: SORIX-LDOM injects a call of this trampoline
+ * Clean shutdown on request: SORIX-ILOM-LDOM injects a call of this trampoline
  * into the guest like an interrupt; it sends SIGPWR to init, whose
  * powerfail entry in /etc/inittab runs shutdown, which halts through
  * HC_HALT. It lives in the rest of lcopyin, unused since its patch.

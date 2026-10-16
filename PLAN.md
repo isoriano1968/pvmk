@@ -1,6 +1,6 @@
-# SORIX-LDOM (pvmk) — Paravirtualizing Microkernel for the Amiga 3000
+# SORIX-ILOM-LDOM (pvmk) — Paravirtualizing Microkernel for the Amiga 3000
 
-The microkernel identifies itself as **SORIX-LDOM** on the console;
+The microkernel identifies itself as **SORIX-ILOM-LDOM** on the console;
 `pvmk` remains the source/working name.
 
 Working name: **pvmk**. A small supervisor-mode microkernel for the A3000
@@ -20,7 +20,7 @@ tracing goes over the serial port, with a GDB remote stub.
    RAM reservation ≤ 256 KB (incl. shadow page tables, log ring, stacks).
 2. **CPUs**: 68030 (+68881/68882), 68040, 68060, and the FPU-less
    68LC040/68LC060. One binary, runtime CPU dispatch. **A working MMU is a
-   hard requirement**; SORIX-LDOM does not emulate one. CPUs without an MMU
+   hard requirement**; SORIX-ILOM-LDOM does not emulate one. CPUs without an MMU
    (68EC030, 68EC040, 68EC060) and accelerator modes that do not provide one
    can run the boot monitor (M1/M2) but cannot run guests (M3+). The CPU
    probe verifies the MMU with a self-test (map a page, translate it, fault
@@ -48,17 +48,17 @@ tracing goes over the serial port, with a GDB remote stub.
 - SMP, Zorro III bus-master isolation (no IOMMU exists), 68020/68851.
 - MMU emulation (see goal 2).
 
-### What SORIX-LDOM is at each stage
+### What SORIX-ILOM-LDOM is at each stage
 - **M0–M2: a boot monitor and boot loader.** It owns the machine only until
   it hands over. `boot dh0` reboots into Kickstart; `boot -native` gives AMIX
-  the whole machine (vectors, supervisor mode). After that SORIX-LDOM is no
+  the whole machine (vectors, supervisor mode). After that SORIX-ILOM-LDOM is no
   longer in control and there is no way back except a reset. `boot -native`
   stays as a fallback, not as the goal.
 - **M3+: a microkernel with paravirtualized guests.** The guest runs in user
-  mode; SORIX-LDOM keeps supervisor mode, its own vector table and the MMU.
+  mode; SORIX-ILOM-LDOM keeps supervisor mode, its own vector table and the MMU.
   Like a service processor (Sun ILOM), it can always be entered while a guest
   runs: a break-in (keyboard combination, Ctrl-C on serial, level 7
-  interrupt) stops the guest and opens the SORIX-LDOM shell, where its
+  interrupt) stops the guest and opens the SORIX-ILOM-LDOM shell, where its
   registers, memory and the logs can be inspected; `resume` continues the
   guest exactly where it stopped. The guest cannot change VBR, mask the
   level 7 interrupt or switch the MMU off: those instructions trap.
@@ -325,11 +325,11 @@ boot -native unix:/stand/unix # M2: hand the machine to AMIX entirely
 ```
 `default=` in `pvmk.conf` takes the same syntax (e.g. `default=unix:/stand/unix`).
 
-**I/O path.** The shell reads the kernel with SORIX-LDOM's native disk
+**I/O path.** The shell reads the kernel with SORIX-ILOM-LDOM's native disk
 drivers (A3000 internal SCSI, Z3660). Reading it through Kickstart's
 drivers at stage0 (a boot request and a reboot, like `boot dh0`) was
 considered for disks without a native driver and dropped: AMIX needs a
-driver for its root disk as well, so a disk SORIX-LDOM cannot read natively
+driver for its root disk as well, so a disk SORIX-ILOM-LDOM cannot read natively
 is usually one AMIX cannot use as root either. Other controllers get a
 native driver instead (as the Z3660 did). Kept as an optional idea only.
 
@@ -676,29 +676,29 @@ Size budget (enforced by a `make size-check` target):
 | M | Deliverable | Acceptance |
 |---|---|---|
 | **M0** | Toolchain (m68k-elf), WinUAE A3000 configs (030/040/060), `pvterm`, Makefile, size check, `mkadf` + `bootblock.s` | `make adf` produces `pvmk.adf` that passes `mkadf --verify`; booting it in WinUAE prints "hello" on serial |
-| **M1** | Boot monitor from the **boot floppy** (bootblock, read-only FFS, `pvmk.conf`), stage0 capture, takeover, serial log, `COLOR00` codes, shell (`md/mw/regs/cpu/dmesg/ls`), `sload/go` | Real A3000 boots to the SORIX-LDOM shell from a physical floppy written from `pvmk.adf`; boot log + previous-boot log readable |
-| **M2** | Read-only UFS reader, `ls`/`cat` on UFS, kernel loading with a free path (`boot unix_root:/stand/unix`) through the native disk drivers, `ld-amix` relocation + bootinfo synthesis, native start (SCSI driver, RDB and `part` were done early, in M1) | Unmodified AMIX boots multi-user via SORIX-LDOM **natively** from `/stand/unix` on its UFS root, on 030, from the internal SCSI and from a Z3660 HDF |
-| **M3** | vCPU core: emulation of all §4.3 instructions (030), reflection, `pvtest` conformance guest (shipped on the ADF under `personalities/`), **break-in and `resume`**, GDB stub, MMU self-test | `pvtest` passes 100 % on 030 (WinUAE + real HW), booted entirely from floppy; a break-in while `pvtest` runs opens the SORIX-LDOM shell and `resume` continues it; GDB can step pvtest |
+| **M1** | Boot monitor from the **boot floppy** (bootblock, read-only FFS, `pvmk.conf`), stage0 capture, takeover, serial log, `COLOR00` codes, shell (`md/mw/regs/cpu/dmesg/ls`), `sload/go` | Real A3000 boots to the SORIX-ILOM-LDOM shell from a physical floppy written from `pvmk.adf`; boot log + previous-boot log readable |
+| **M2** | Read-only UFS reader, `ls`/`cat` on UFS, kernel loading with a free path (`boot unix_root:/stand/unix`) through the native disk drivers, `ld-amix` relocation + bootinfo synthesis, native start (SCSI driver, RDB and `part` were done early, in M1) | Unmodified AMIX boots multi-user via SORIX-ILOM-LDOM **natively** from `/stand/unix` on its UFS root, on 030, from the internal SCSI and from a Z3660 HDF |
+| **M3** | vCPU core: emulation of all §4.3 instructions (030), reflection, `pvtest` conformance guest (shipped on the ADF under `personalities/`), **break-in and `resume`**, GDB stub, MMU self-test | `pvtest` passes 100 % on 030 (WinUAE + real HW), booted entirely from floppy; a break-in while `pvtest` runs opens the SORIX-ILOM-LDOM shell and `resume` continues it; GDB can step pvtest |
 | **M4** | vMMU 030 shadow, IRQ virtualization, hypercalls, AMIX PV patches (`pvcons`, idle, reboot, detection) | AMIX boots **single-user deprivileged** on 030; a break-in into running AMIX and `resume` work; same kernel still boots native |
-| **M5** | Boot menu, like the FreeBSD/illumos loader menu: shown on screen and serial at every boot (keyboard and serial input), countdown from `timeout=`, then the default entry. Entries: boot the default; choose a kernel on an AMIX root (`/stand/unix*` and any path, listed with size; the kind, stock 030 or 040/060 port, is recognised from the `cputype` symbol when it is loaded); deprivileged or native; AmigaOS partitions; SORIX-LDOM shell; reboot. `pvmk.conf` gains named entries (`entry=label,dev:path,pv|native`) and the default by label; a kernel that does not fit the CPU (stock 030 kernel on a 68040/68060, 040/060 kernel without `cputype`) is marked and needs confirmation. Once-only next boot (`nextboot`, kept across the warm reset like the boot request) and fallback: a kernel that panics or reboots within a set time hands the next boot back to the previous default | On the real A3000 (onboard 030, and the Z3660 060 with the A1 kernel): the menu appears on screen and serial, a different `/stand` kernel is chosen and boots, the shell entry and the timeout work; a deliberately broken kernel falls back to the default on the next boot |
+| **M5** | Boot menu, like the FreeBSD/illumos loader menu: shown on screen and serial at every boot (keyboard and serial input), countdown from `timeout=`, then the default entry. Entries: boot the default; choose a kernel on an AMIX root (`/stand/unix*` and any path, listed with size; the kind, stock 030 or 040/060 port, is recognised from the `cputype` symbol when it is loaded); deprivileged or native; AmigaOS partitions; SORIX-ILOM-LDOM shell; reboot. `pvmk.conf` gains named entries (`entry=label,dev:path,pv|native`) and the default by label; a kernel that does not fit the CPU (stock 030 kernel on a 68040/68060, 040/060 kernel without `cputype`) is marked and needs confirmation. Once-only next boot (`nextboot`, kept across the warm reset like the boot request) and fallback: a kernel that panics or reboots within a set time hands the next boot back to the previous default | On the real A3000 (onboard 030, and the Z3660 060 with the A1 kernel): the menu appears on screen and serial, a different `/stand` kernel is chosen and boots, the shell entry and the timeout work; a deliberately broken kernel falls back to the default on the next boot |
 | **M6** | Stability + performance: multi-user, SCSI/network under load, stats, optional spl patching | AMIX multi-user; kernel build of a driver completes; overhead measured & documented |
 | **M7** | 040 then 060 back-ends, FPSP/ISP modules, 040/060 shadow MMU | M3–M6 acceptance repeated on A3640 (040) and an 060 card |
 | **M8** | `ld-kick`: Kickstart 3.1 personality, pass-through custom chips | Workbench boots under pvmk; `ColdReboot` returns to shell |
 | **M9** (stretch) | Concurrent personalities with device partitioning (e.g., AMIX headless on serial+SCSI, AmigaOS on display) | Proof of concept only |
-| **M10** (to be decided) | ILOM-like web console over the Z3660 network interface: NIC driver owned by SORIX-LDOM, minimal TCP/IP (ARP, IPv4, ICMP, small TCP; static IP from `pvmk.conf`, DHCP later), HTTP server with login (password hash in `pvmk.conf`, session cookie; plain HTTP on the LAN, HTTPS optional later). Pages: version, CPU/MMU, uptime, memory, disks, log, personalities and their state; actions: stop (break-in), resume, reset, kill. Needs M4's IRQ virtualization so the console answers while a guest masks interrupts. Stack tested on the host against a mock NIC; the Z3660 driver on real hardware. Name, scope and order still to be decided | From a browser on the LAN: log in, see the status of SORIX-LDOM and a running AMIX, stop and resume it |
-| **M11** (last) | Optional hard disk boot of SORIX-LDOM itself: the same boot block on an RDB `PVMK` partition (`DE_BOOTBLOCKS`), `pvinstall` to create/repair it. Until then, and possibly for good, the boot floppy is the boot medium | Real A3000 boots SORIX-LDOM from its `PVMK` partition with no floppy |
+| **M10** (to be decided) | ILOM-like web console over the Z3660 network interface: NIC driver owned by SORIX-ILOM-LDOM, minimal TCP/IP (ARP, IPv4, ICMP, small TCP; static IP from `pvmk.conf`, DHCP later), HTTP server with login (password hash in `pvmk.conf`, session cookie; plain HTTP on the LAN, HTTPS optional later). Pages: version, CPU/MMU, uptime, memory, disks, log, personalities and their state; actions: stop (break-in), resume, reset, kill. Needs M4's IRQ virtualization so the console answers while a guest masks interrupts. Stack tested on the host against a mock NIC; the Z3660 driver on real hardware. Name, scope and order still to be decided | From a browser on the LAN: log in, see the status of SORIX-ILOM-LDOM and a running AMIX, stop and resume it |
+| **M11** (last) | Optional hard disk boot of SORIX-ILOM-LDOM itself: the same boot block on an RDB `PVMK` partition (`DE_BOOTBLOCKS`), `pvinstall` to create/repair it. Until then, and possibly for good, the boot floppy is the boot medium | Real A3000 boots SORIX-ILOM-LDOM from its `PVMK` partition with no floppy |
 
 ### AMIX-side milestones (in the AMIX tree, built with `~/opt/amix-cross`)
 
 These change the AMIX kernel itself and run in parallel with the
-SORIX-LDOM milestones. Everything stays bootable natively (`boot -native`)
-and deprivileged (`boot -pv`); SORIX-LDOM's load-time PV patches keep
+SORIX-ILOM-LDOM milestones. Everything stays bootable natively (`boot -native`)
+and deprivileged (`boot -pv`); SORIX-ILOM-LDOM's load-time PV patches keep
 working on unmodified kernels.
 
 | A | Deliverable | Acceptance |
 |---|---|---|
-| **A1** | AMIX kernel for 68040/68060: adopt the amigaux.org port (github.com/asokero/amix-040-060-port, built per its BUILDING.md with jusii/amix-kerntools against our own AMIX 2.1c tree; it binary-patches the stock `stand/unix`, relinks HAT and pstart overrides, changes the page size from 2 KB to 4 KB, adds Motorola FPSP/060SP from NetBSD sources, copyback caches). It replaces the local partial series `amix/0001`–`0009`. SORIX-LDOM's loader must follow its loader's contract (github.com/asokero/amix-unix-boot, `unix_boot040`): poke the kernel's `cputype` global (40/60), PC-relative relocations (FPSP kernels), bind at `0x08000000` with accelerator RAM, MMU off via `movec` | The port's kernel boots natively to login on the Z3660 68060 in the A3000 through `boot -native`, and on 030 FS-UAE the stock kernel still does. With 4 KB pages the 68040/68060 shadow MMU maps AMIX pages one to one (unblocks M7) |
-| **A2** | `z3660scsi` for AMIX: use github.com/jusii/amix-z3660scsi (with the Z3660-amix firmware, github.com/jusii/Z3660-amix branch `release-1.0`) | AMIX root and swap on Z3660 HDFs, native and under SORIX-LDOM |
+| **A1** | AMIX kernel for 68040/68060: adopt the amigaux.org port (github.com/asokero/amix-040-060-port, built per its BUILDING.md with jusii/amix-kerntools against our own AMIX 2.1c tree; it binary-patches the stock `stand/unix`, relinks HAT and pstart overrides, changes the page size from 2 KB to 4 KB, adds Motorola FPSP/060SP from NetBSD sources, copyback caches). It replaces the local partial series `amix/0001`–`0009`. SORIX-ILOM-LDOM's loader must follow its loader's contract (github.com/asokero/amix-unix-boot, `unix_boot040`): poke the kernel's `cputype` global (40/60), PC-relative relocations (FPSP kernels), bind at `0x08000000` with accelerator RAM, MMU off via `movec` | The port's kernel boots natively to login on the Z3660 68060 in the A3000 through `boot -native`, and on 030 FS-UAE the stock kernel still does. With 4 KB pages the 68040/68060 shadow MMU maps AMIX pages one to one (unblocks M7) |
+| **A2** | `z3660scsi` for AMIX: use github.com/jusii/amix-z3660scsi (with the Z3660-amix firmware, github.com/jusii/Z3660-amix branch `release-1.0`) | AMIX root and swap on Z3660 HDFs, native and under SORIX-ILOM-LDOM |
 | **A3** | `z3660net` for AMIX: use github.com/jusii/amix-z3660net (`zen0`) | `ping`, `telnet`, NFS from AMIX on the Z3660 |
 | **A4** | `z3660rtg` for AMIX: use github.com/jusii/amix-z3660rtg with X11 (isoriano1968/x11r6.3-amix, asokero/xrtg-amix) | AMIX console/X11 on the Z3660 RTG output |
 
@@ -706,14 +706,14 @@ Source: amigaux.org (amigaux 1.0, 2026-10-14) and its GitHub list. Its
 hardware page lists the Z3660 with a real 68060/68LC060 as supported and
 the Z3660's 68030 and emulated 68040 modes as not supported (68030 mode
 planned for 1.1); the A3000 was verified with an earlier build only.
-Under SORIX-LDOM, the same drivers drive pass-through devices; the
+Under SORIX-ILOM-LDOM, the same drivers drive pass-through devices; the
 Z3660's register windows must be mapped for the guest.
 
 Real-hardware test platforms (all on the A3000):
 - 68030: the A3000's own onboard 68030 (accelerator off). This is where
   the 030 paths (M3–M6, deprivileged AMIX with the stock kernel) are
   confirmed, with the AMIX disk on a ZuluSCSI at the A3000's onboard SCSI
-  controller (SORIX-LDOM's WD33C93 driver; AMIX's own A3000 SCSI driver).
+  controller (SORIX-ILOM-LDOM's WD33C93 driver; AMIX's own A3000 SCSI driver).
 - 68040/68060: a physical CPU (the Z3660's real 68060), or the Z3660's
   emulated CPU once an emulation with a working MMU is available (the
   boot-time MMU self-test decides; today's emu040 mode is not supported
@@ -722,16 +722,16 @@ Real-hardware test platforms (all on the A3000):
 Notes:
 - A1 is the prerequisite for AMIX on the 68040/68060 platforms; A2 for
   the Z3660's disks there.
-- Device ownership: when SORIX-LDOM's own web console (M10) uses the Z3660
+- Device ownership: when SORIX-ILOM-LDOM's own web console (M10) uses the Z3660
   network interface, AMIX's `z3660net` (A3) cannot drive it at the same
-  time; one of them owns it (§6.2), or SORIX-LDOM offers AMIX a
+  time; one of them owns it (§6.2), or SORIX-ILOM-LDOM offers AMIX a
   paravirtual network device.
 
 M1 + M2 alone already give a useful product: a debuggable, serial-traced boot
 manager for AMIX/AmigaOS on the A3000. The microkernel property (guests
-under SORIX-LDOM's control, break-in and resume) starts with M3.
+under SORIX-ILOM-LDOM's control, break-in and resume) starts with M3.
 
-The hard disk boot of SORIX-LDOM itself was moved from M1 to M11: it is
+The hard disk boot of SORIX-ILOM-LDOM itself was moved from M1 to M11: it is
 only worth doing once everything works from the boot floppy.
 
 Status (2026-10-15): M0 done and tested on a real A3000 (Z3660). M1 floppy
@@ -756,7 +756,7 @@ MMU self-test done (boot time; guests refused without a working MMU;
 passes on 030/040/060 in FS-UAE, correctly fails on a 68EC030).
 Idle on STOP done: the CPU stops at the guest's interrupt level and the
 waking interrupt is delivered to the guest (serial input stays
-SORIX-LDOM's: Ctrl-C breaks in during idle too).
+SORIX-ILOM-LDOM's: Ctrl-C breaks in during idle too).
 GDB stub done: RSP on the Paula port for the stopped guest (`gdb` command;
 target.xml, g/G/p/P, m/M fault-safe, Z0 breakpoints as ILLEGAL, step via
 T1, continue, detach, kill, noack, guest console as `O` packets); `make test`
@@ -768,12 +768,12 @@ boot menu's AmigaOS entry, or `boot -pv dh0`) starts Kickstart from the
 ROM at its reset entry, deprivileged; RESET resets the custom chips
 (interrupts, requests, DMA) instead of meaning a reboot, so AmigaOS's own
 reboot runs inside the guest. Kickstart sizes the A3000's RAM itself
-(without touching SORIX-LDOM's hole) and counts the hole as free: at its
+(without touching SORIX-ILOM-LDOM's hole) and counts the hole as free: at its
 first idle STOP, when exec's lists are consistent and nothing is
-allocated at the top of RAM, SORIX-LDOM takes the hole out of the free
+allocated at the top of RAM, SORIX-ILOM-LDOM takes the hole out of the free
 list of the MemHeader holding it (as AllocAbs) and lowers its upper
 bound; after a guest reboot again. AmigaOS then boots from the floppy,
-i.e. SORIX-LDOM's: stage0 recognises that it runs under SORIX-LDOM
+i.e. SORIX-ILOM-LDOM's: stage0 recognises that it runs under SORIX-ILOM-LDOM
 (through exec Supervisor(), TRAP #15 is the HC_VERSION hypercall, which
 natively goes to a handler installed for that one call) and declines the
 floppy, so Kickstart continues with the next boot device. Result:
@@ -789,8 +789,8 @@ SCSI transfer can leave the target holding the bus (the WD33C93A cannot
 reset the SCSI bus). Open: Workbench and applications, the
 68040/68060 libraries (MMU and cache calls), SuperKickstart RAM, real
 A3000.
-Ending a guest from SORIX-LDOM: `shutdown` asks AMIX to shut down
-cleanly. SORIX-LDOM injects a call into the guest like an interrupt (a
+Ending a guest from SORIX-ILOM-LDOM: `shutdown` asks AMIX to shut down
+cleanly. SORIX-ILOM-LDOM injects a call into the guest like an interrupt (a
 format 0 frame on its supervisor stack, IPL 7) as soon as it runs at
 interrupt level 0, to a trampoline written into the unused tail of the
 patched lcopyin: psignal(proc_init, SIGPWR); init runs the powerfail
@@ -798,17 +798,17 @@ entry of /etc/inittab (shutdown -y -i0 -g0), which halts through
 HC_HALT; the console comes back on the screen. Tested in FS-UAE (68030):
 halted ~3 minutes later, the next boot needed no fsck. `kill` discards
 any guest at once (MMU, interrupts, DMA, screen, keyboard and SCSI back
-to SORIX-LDOM); AMIX's file systems are then checked at its next boot.
+to SORIX-ILOM-LDOM); AMIX's file systems are then checked at its next boot.
 The AmigaOS personality (M8) will be ended with `kill` (or a reboot).
 M7 in progress (FS-UAE): shadow MMU for the 68040 and 68060. The shadow
 geometry is per CPU family (68030 8/8/5 with 2 KB pages; 68040/68060
 7/7/6 with 4 KB pages, aligned tables; the descriptor bits used are the
-same); SORIX-LDOM sits behind supervisor-only DTT0 (low 16 MB, precise
+same); SORIX-ILOM-LDOM sits behind supervisor-only DTT0 (low 16 MB, precise
 non-cacheable), DTT1 and ITT0 (cacheable); the guest runs through URP.
 Guest side: TC (E, P), URP/SRP, ITT/DTT (S field, CM, W) walked in
 software, resident/indirect descriptors, U/M kept, PLPA translated.
 Access errors: 68060 format 4 (fault address, FSLW; restart), 68040
-format 7 (restart; for shadow misses SORIX-LDOM completes the pending
+format 7 (restart; for shadow misses SORIX-ILOM-LDOM completes the pending
 write-backs WB3/WB2/WB1 through the guest's tables); reflected frames
 carry the supervisor TM bit for faults of the guest's kernel; the
 guest's RTE of a format 7 frame goes back to the CPU, of format 4 is a
@@ -820,7 +820,7 @@ PTEST on the 68030, translation off), passing on 68030, 68040 and
 AMIX's 040/060 port kernel (A1, built by the AMIX-side work: /stand/
 unix-040 on the test disk) boots deprivileged to the login prompt in
 FS-UAE on the 68060 and the 68040 (`boot -pv unix_root:/stand/unix-040`;
-fsck, the guest reboot through SORIX-LDOM, multi-user). Needed on the
+fsck, the guest reboot through SORIX-ILOM-LDOM, multi-user). Needed on the
 way: R_68K_PC16/PC8 relocations in the loader; the guest's 68060 PCR
 DFP/ESS bits reach the real PCR (the FPU starts disabled); 68060 FPU
 frames are 12 bytes; an access that runs into the next page (reported at
@@ -866,7 +866,7 @@ kernel chooser for /stand, deprivileged/native toggle, shell, reboot;
 fallback to the default when a non-default deprivileged kernel reboots
 within `fallback=` seconds; kernel/CPU check with confirmation (`boot -f`),
 `cputype` set for 68040/68060 port kernels, R_68K_PC32 relocations. The
-hole is 320 KB now (SORIX-LDOM's data grew with the shadow pool and the
+hole is 320 KB now (SORIX-ILOM-LDOM's data grew with the shadow pool and the
 screen save buffer). Open: test on the real A3000.
 M4 in progress (68030): `boot -pv unix_root:` starts the unmodified AMIX
 kernel deprivileged. Done: 68030 shadow MMU (core/vmmu.c: guest tables
@@ -878,7 +878,7 @@ mapped), guest bus errors (68030 frames A/B reflected with the guest's
 function code, entered through a fresh frame; the guest's RTE hands the
 frame back to the CPU), faults inside emulated instructions (synthetic
 restartable format A frame), full 68020 extension words, interrupts that
-arrive while SORIX-LDOM handles a trap, and the first PV patch: AMIX's
+arrive while SORIX-ILOM-LDOM handles a trap, and the first PV patch: AMIX's
 lcopyin/lcopyout replaced at load time by HC_COPYIN/HC_COPYOUT (same
 u_caddrflt contract; the kernel on disk is unchanged and still boots
 natively). AMIX's memory list ends below the hole.
@@ -893,7 +893,7 @@ Halt and reboot: AMIX's haltsys is patched to HC_HALT (and a guest RESET
 counts as a reboot): halt stops the guest, reboot loads the kernel again
 and restarts it deprivileged (`boot -pv` target remembered).
 Break-in from the Amiga keyboard: Ctrl + Left Amiga + Help (FS-UAE on a
-PC: Left Ctrl + Left Windows + End). SORIX-LDOM snoops CIA-A's serial
+PC: Left Ctrl + Left Windows + End). SORIX-ILOM-LDOM snoops CIA-A's serial
 data register on the guest's keyboard interrupts (non-destructive), stops
 the guest and puts its console on the screen and keyboard; its chip RAM
 block and DMACON are saved, and `resume` gives them back with AMIX's

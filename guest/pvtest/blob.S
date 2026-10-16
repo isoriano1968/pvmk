@@ -1,6 +1,6 @@
 /*
  * The pvtest guest, built separately (linked at PVTEST_BASE) and embedded
- * in the SORIX-LDOM image as a flat binary.
+ * in the SORIX-ILOM-LDOM image as a flat binary.
  */
 	.section .rodata
 	.balign	4

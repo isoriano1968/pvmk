@@ -105,7 +105,7 @@ dostype_kind(u32 t)
 	if ((t >> 8) == 0x554e49)	/* UNI: AMIX */
 		return "AMIX";
 	if (t == 0x50564d00)		/* PVM\0: this microkernel */
-		return "SORIX-LDOM";
+		return "SORIX-ILOM-LDOM";
 	return "-";
 }
 

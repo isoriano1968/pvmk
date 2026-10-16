@@ -4,7 +4,7 @@
 #ifndef PVMK_VERSION_H
 #define PVMK_VERSION_H
 
-#define SORIX_NAME	"SORIX-LDOM"
+#define SORIX_NAME	"SORIX-ILOM-LDOM"
 
 #ifndef PVMK_VERSION
 #define PVMK_VERSION	"0.0-dev"	/* set by the Makefile from git */

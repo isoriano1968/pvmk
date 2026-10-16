@@ -1,5 +1,5 @@
 /*
- * MMU self-test: SORIX-LDOM requires a working MMU to run guests.
+ * MMU self-test: SORIX-ILOM-LDOM requires a working MMU to run guests.
  *
  * Everything below 0xC0000000 stays identity mapped through the
  * transparent translation registers (code, stack, chip RAM, I/O, Zorro);

@@ -25,9 +25,9 @@
 /*
  * Shadow geometry, by CPU family (set in vmmu_reset):
  *  68030: TIA 8, TIB 8, TIC 5, 2 KB pages, short descriptors;
- *         TC = E | PS 2K | IS 0 | 8/8/5. SORIX-LDOM: TT0 = everything for
+ *         TC = E | PS 2K | IS 0 | 8/8/5. SORIX-ILOM-LDOM: TT0 = everything for
  *         supervisor function codes.
- *  68040/68060: 7/7/6, 4 KB pages (TC = E). SORIX-LDOM: supervisor-only
+ *  68040/68060: 7/7/6, 4 KB pages (TC = E). SORIX-ILOM-LDOM: supervisor-only
  *         transparent translation, DTT0 the low 16 MB (chip RAM, I/O)
  *         non-cacheable, DTT1 and ITT0 everything else cacheable
  *         (write-through), so its accesses stay coherent with the guest's
@@ -97,7 +97,7 @@ dsig(u32 a)				/* a guest descriptor's value */
 	return v;
 }
 
-/* software TLB for SORIX-LDOM's own accesses to guest memory */
+/* software TLB for SORIX-ILOM-LDOM's own accesses to guest memory */
 #define NTLB		16
 struct tlb {
 	u32 va, pa;			/* 256-byte pages; va = 1: empty */
@@ -881,7 +881,7 @@ shadow_fill(u32 va, int write)
  * +0x14, write-backs WB3/WB2/WB1 (status words at +0x0E/+0x10/+0x12: V bit
  * 7, size bits 6-5; address and data at +0x18/+0x1C, +0x20/+0x24,
  * +0x28/+0x2C). The CPU restarts the instruction but does not do pending
- * write-backs, the handler does: for a shadow miss SORIX-LDOM fills the
+ * write-backs, the handler does: for a shadow miss SORIX-ILOM-LDOM fills the
  * shadow, completes the write-backs through the guest's tables and
  * returns. Anything that does not work out is the guest's to handle.
  */
@@ -1067,7 +1067,7 @@ vmmu_watch_step(void)
 
 /*
  * The watched long changed without a write through the MMU (DMA, or
- * SORIX-LDOM itself)? Checked on every entry from the guest.
+ * SORIX-ILOM-LDOM itself)? Checked on every entry from the guest.
  */
 int
 vmmu_watch_check(u32 *old, u32 *now)
@@ -1114,7 +1114,7 @@ vmmu_dump(u32 va, int super)
 	kprintf("  -> %08x, MMUSR %04x%s%s%s%s%s\n", w.pa, sr,
 	    sr & MMUSR_I ? " invalid" : "", sr & MMUSR_W ? " write-protected" : "",
 	    sr & MMUSR_S ? " supervisor-only" : "", sr & MMUSR_L ? " limit" : "",
-	    sr & MMUSR_B ? " SORIX-LDOM hole" : "");
+	    sr & MMUSR_B ? " SORIX-ILOM-LDOM hole" : "");
 	pd = shadow_get(&views[super != 0], va);
 	kprintf("  shadow (%s view): %08x\n", super ? "kernel" : "user", pd);
 }

@@ -4,7 +4,7 @@
  * The guest sees the MMU of the real CPU: a 68030 PMMU (TC, CRP, SRP,
  * TT0/TT1, MMUSR, PFLUSH, PTEST) or a 68040/68060 MMU (TC, URP, SRP,
  * ITT/DTT, PFLUSH, PTEST/PLPA), and builds its own tables, which
- * SORIX-LDOM never installs. The real MMU translates the guest (always in
+ * SORIX-ILOM-LDOM never installs. The real MMU translates the guest (always in
  * real user mode) through shadow tables of a fixed geometry (68030: 8/8/5
  * index bits, 2 KB pages; 68040/68060: 7/7/6, 4 KB pages), filled on
  * demand from the guest's tables:
@@ -19,13 +19,13 @@
  *    guest's;
  *  - guest PFLUSH and any change of TC, CRP, SRP, TT0, TT1 drop the
  *    shadow tables;
- *  - SORIX-LDOM's hole is never mapped.
+ *  - SORIX-ILOM-LDOM's hole is never mapped.
  *
- * SORIX-LDOM itself runs with transparent translation covering everything
+ * SORIX-ILOM-LDOM itself runs with transparent translation covering everything
  * for supervisor accesses (68030 TT0; 68040/68060 DTT0/DTT1/ITT0), so its
  * own accesses are physical and never fault. Access errors: 68030 frames
  * A/B (rerun), 68060 format 4 (restart), 68040 format 7 (restart, with
- * the pending write-backs completed by SORIX-LDOM for shadow misses).
+ * the pending write-backs completed by SORIX-ILOM-LDOM for shadow misses).
  */
 #ifndef PVMK_VMMU_H
 #define PVMK_VMMU_H
@@ -34,7 +34,7 @@
 #include "pvmk/types.h"
 
 /* 68030 MMUSR bits */
-#define MMUSR_B		0x8000		/* bus error (here: SORIX-LDOM's hole) */
+#define MMUSR_B		0x8000		/* bus error (here: SORIX-ILOM-LDOM's hole) */
 #define MMUSR_L		0x4000		/* limit violation */
 #define MMUSR_S		0x2000		/* supervisor only */
 #define MMUSR_W		0x0800		/* write protected */
@@ -50,7 +50,7 @@ void vmmu_flush(void);			/* guest flush, root or TC change */
 void vmmu_flush_user(void);		/* new CRP: the user view only */
 void vmmu_pflush(void);			/* guest PFLUSH: revalidate */
 void vmmu_activate(void);		/* before entering the guest */
-void vmmu_off(void);			/* SORIX-LDOM gives the machine away */
+void vmmu_off(void);			/* SORIX-ILOM-LDOM gives the machine away */
 
 /*
  * Translate a guest virtual address the way the guest's MMU would

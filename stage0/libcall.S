@@ -21,8 +21,8 @@ lib_call:
 /*
  * u32 sorix_guest(void *sysbase)
  *
- * 'SORX' if this AmigaOS runs as a guest of SORIX-LDOM, else 0. In
- * supervisor mode (exec Supervisor()) TRAP #15 with D0 = 0 is SORIX-LDOM's
+ * 'SORX' if this AmigaOS runs as a guest of SORIX-ILOM-LDOM, else 0. In
+ * supervisor mode (exec Supervisor()) TRAP #15 with D0 = 0 is SORIX-ILOM-LDOM's
  * HC_VERSION hypercall, which returns 'SORX'; natively the trap goes to a
  * handler installed for this one call that returns 0.
  */
@@ -42,5 +42,5 @@ sorix_guest:
 	trap	#15
 	move.l	%a1,47*4(%a0)
 	rte
-2:	moveq	#0,%d0				/* native: no SORIX-LDOM */
+2:	moveq	#0,%d0				/* native: no SORIX-ILOM-LDOM */
 	rte

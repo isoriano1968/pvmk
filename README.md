@@ -1,4 +1,4 @@
-# SORIX-LDOM — paravirtualizing microkernel for the Amiga 3000
+# SORIX-ILOM-LDOM — paravirtualizing microkernel for the Amiga 3000
 
 Working/source name: `pvmk`.
 
@@ -28,7 +28,7 @@ make run        # boot in FS-UAE with the serial console in this terminal (Ctrl-
 make run UAE_CPU=060
 make run UAE_HDF=                # without the test hard disk
 make run-amix                    # with a writable copy of your AMIX disk:
-                                 #   SORIX-LDOM> boot unix_root:
+                                 #   SORIX-ILOM-LDOM> boot unix_root:
 host/pvterm /dev/ttyUSB0          # real A3000, 115200 8N1
 ```
 
@@ -65,13 +65,13 @@ In `pvmk.conf`, `display=off` disables the screen and `keymap=` selects the
 keyboard layout: `us`, `de` (Amiga German keyboard) or `de-pc` (German PC
 keyboard under FS-UAE/WinUAE).
 
-Hold the left mouse button at power-on to skip SORIX-LDOM and boot
+Hold the left mouse button at power-on to skip SORIX-ILOM-LDOM and boot
 AmigaOS from the same disk.
 
 ## Shell
 
 ```
-SORIX-LDOM> help
+SORIX-ILOM-LDOM> help
   ver  cpu  mem  conf            system information
   scsi                           rescan the A3000 internal SCSI bus
   part                           list RDB partitions (all disks, all controllers)
@@ -97,7 +97,7 @@ SORIX-LDOM> help
 reboots. stage0 picks it up while Kickstart is alive, frees its memory and
 makes the floppy's boot block decline; strap then goes on with the next
 boot device in priority order, so Kickstart boots DH0 its normal way even
-with the SORIX-LDOM floppy in DF0. Strap keeps its own order at that point,
+with the SORIX-ILOM-LDOM floppy in DF0. Strap keeps its own order at that point,
 so only the highest-priority bootable device after the floppy can be chosen
 this way; `boot` says so for any other partition.
 
@@ -127,7 +127,7 @@ The boot log survives a warm reset: `dmesg -p` shows the previous boot.
   through Kickstart's drivers for disks without a native driver, tests on
   the real A3000.
 - M3 (in progress): virtual CPU. A guest runs in user mode while
-  SORIX-LDOM keeps supervisor mode, its vectors and the MMU: privileged
+  SORIX-ILOM-LDOM keeps supervisor mode, its vectors and the MMU: privileged
   instructions (SR access, MOVE USP, MOVEC, RTE, STOP, RESET, MOVES,
   PMOVE/PFLUSH/PTEST, CINV/CPUSH, FSAVE/FRESTORE) are emulated, exceptions
   and interrupts are reflected through the guest's own VBR, TRAP #15 is a
@@ -145,8 +145,8 @@ The boot log survives a warm reset: `dmesg -p` shows the previous boot.
 Debugging pvtest with GDB in FS-UAE:
 
 ```sh
-python3 host/uae.py run --gdb-port 2345    # SORIX-LDOM> pvtest stop
-                                           # SORIX-LDOM> gdb
+python3 host/uae.py run --gdb-port 2345    # SORIX-ILOM-LDOM> pvtest stop
+                                           # SORIX-ILOM-LDOM> gdb
 gdb-multiarch build/pvtest.elf -ex 'target remote localhost:2345'
 ```
 
@@ -155,15 +155,15 @@ On real hardware: `target remote /dev/ttyUSB0` after `set serial baud 115200`.
   68030, with a shadow MMU built from AMIX's own page tables and a
   load-time PV patches (copyin/copyout, halt/reboot). In FS-UAE AMIX boots
   to multi-user and login, slowly (every spl traps; M6 makes that fast).
-  A reboot goes through SORIX-LDOM, which boots the kernel again. Break in
+  A reboot goes through SORIX-ILOM-LDOM, which boots the kernel again. Break in
   with Ctrl + Left Amiga + Help (FS-UAE on a PC: Left Ctrl + Left Windows
   + End) or Ctrl-C on serial; `resume` gives AMIX its screen back.
   `shutdown` shuts a stopped AMIX down cleanly (SIGPWR to its init, the
   powerfail entry of /etc/inittab), `kill` discards a guest at once.
 - M8 (in progress): AmigaOS as a guest. `kick` (or the boot menu's
   AmigaOS entry in deprivileged mode) runs Kickstart from the ROM under
-  SORIX-LDOM; it boots to its CLI from the hard disk in FS-UAE (the boot
-  floppy declines itself under SORIX-LDOM, SORIX-LDOM's memory is taken
+  SORIX-ILOM-LDOM; it boots to its CLI from the hard disk in FS-UAE (the boot
+  floppy declines itself under SORIX-ILOM-LDOM, SORIX-ILOM-LDOM's memory is taken
   out of AmigaOS's free list).
 - M7: shadow MMU for the 68040 and 68060 too. The amigaux.org 040/060
   AMIX kernel boots deprivileged to the login prompt in FS-UAE on both
@@ -181,7 +181,7 @@ ILLEGAL instructions the stub tells apart by address.
   falls back to the default. Kernels that do not fit the CPU (stock 030
   kernel on a 68040/68060, 040/060 port kernel on a 68030) need a
   confirmation.
-- Hard disk boot of SORIX-LDOM itself (`PVMK` partition, `pvinstall`) is
+- Hard disk boot of SORIX-ILOM-LDOM itself (`PVMK` partition, `pvinstall`) is
   the last milestone (M11); the boot floppy is the boot medium until then.
 
 ## Layout

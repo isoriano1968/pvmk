@@ -1,5 +1,5 @@
 /*
- * Virtual CPU: a guest runs in user mode while SORIX-LDOM keeps supervisor
+ * Virtual CPU: a guest runs in user mode while SORIX-ILOM-LDOM keeps supervisor
  * mode, its own VBR and the MMU. Privileged instructions trap and are
  * emulated against the virtual state below; exceptions are reflected to the
  * guest through its virtual VBR; TRAP #15 from guest supervisor mode is a
@@ -27,7 +27,7 @@
 #define HC_GETC		2		/* D0 = character or -1 */
 #define HC_IDLE		3
 #define HC_EXIT		7		/* D1 = exit code: back to the shell */
-#define HC_BREAK	8		/* enter the SORIX-LDOM shell */
+#define HC_BREAK	8		/* enter the SORIX-ILOM-LDOM shell */
 #define HC_WRITE	9		/* A0 = buffer, D1 = length */
 #define HC_COPYIN	10		/* A0 user -> A1 kernel, D1 bytes */
 #define HC_COPYOUT	11		/* A0 kernel -> A1 user, D1 bytes */
