@@ -11,6 +11,10 @@
  *   dostype=0xHEX   default: DOS\1, or the image's first four bytes
  *   pri=N           boot priority; makes the partition bootable
  *   bootblocks=N    boot from the partition's first N blocks (DE_BOOTBLOCKS)
+ *   pvbb            the image is a pvmk boot volume (pvmk.adf): point its
+ *                   boot block at this partition (image's absolute first
+ *                   block, medium hard disk) and fix the checksum, as the
+ *                   SORIX-ILOM-LDOM shell's "update" does
  *
  * Cylinders 0-1 hold the RDB; partitions follow in order, each rounded up
  * to whole cylinders (default geometry: 1 head, 32 sectors = 16 KB).
@@ -19,6 +23,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "pvmk/image.h"
 
 #define BSIZE		512
 #define MAXPART		16
@@ -35,6 +41,7 @@ struct part {
 	int32_t pri;
 	int bootable;
 	uint32_t bootblocks;
+	int pvbb;
 	uint32_t lowcyl, highcyl;
 };
 
@@ -60,6 +67,29 @@ wr32(uint8_t *p, uint32_t v)
 	p[1] = v >> 16;
 	p[2] = v >> 8;
 	p[3] = v;
+}
+
+/* a pvmk boot volume at partition block `first`: boot from the disk */
+static void
+pvbb_retarget(uint8_t *vol, uint32_t first, const char *what)
+{
+	uint8_t *pv = vol + PVBB_OFFSET;
+	uint32_t sum = 0, v, i;
+
+	if (rd32(vol) != 0x444f5301 || rd32(pv + PVBB_O_MAGIC) != PVBB_MAGIC ||
+	    rd32(pv + PVBB_O_START) != 2)
+		die("%s: not a pvmk boot volume (pvbb)", what);
+	wr32(pv + PVBB_O_START, first + 2);
+	pv[PVBB_O_MEDIUM] = 0;
+	pv[PVBB_O_MEDIUM + 1] = BOOT_HARDDISK;
+	wr32(vol + 4, 0);
+	for (i = 0; i < 1024; i += 4) {
+		v = rd32(vol + i);
+		if (sum + v < sum)
+			sum++;
+		sum += v;
+	}
+	wr32(vol + 4, ~sum);
 }
 
 /* RDB blocks: the first SummedLongs longs, checksum included, sum to 0. */
@@ -146,6 +176,8 @@ parse_part(struct part *p, char *spec)
 			p->bootable = 1;
 		} else if (!strcmp(opt, "bootblocks") && eq)
 			p->bootblocks = (uint32_t)strtoul(eq, NULL, 0);
+		else if (!strcmp(opt, "pvbb") && !eq)
+			p->pvbb = 1;
 		else
 			die("bad partition option '%s'", opt);
 		opt = next;
@@ -250,6 +282,9 @@ build(const char *out, struct part *parts, int nparts, uint32_t heads,
 			if (!in || fread(disk + off, 1, (size_t)sz, in) != (size_t)sz)
 				die("cannot read %s", p->image);
 			fclose(in);
+			if (p->pvbb)
+				pvbb_retarget(disk + off, (uint32_t)(off / BSIZE),
+				    p->image);
 		}
 	}
 

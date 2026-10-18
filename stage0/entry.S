@@ -3,12 +3,12 @@
  *
  * Called by the boot block with:
  *	A0 = image base   A1 = IOStdReq   A6 = SysBase
- *	D0 = boot medium  D1 = serial baud
+ *	D0 = boot medium  D1 = serial baud  D2 = first image block on the device
  *
  * Applies the image's own relocation table (the image is linked at 0),
  * moves the table to just past bss (takeover reuses it to relocate the
  * image again), clears bss, flushes caches, switches to the pvmk boot stack and calls
- * stage0_main(sysbase, ioreq, medium, baud, base). Returns its result in
+ * stage0_main(sysbase, ioreq, medium, baud, base, start). Returns its result in
  * D0 to the boot block on the caller's stack.
  */
 #include "pvmk/amiga.h"
@@ -84,13 +84,15 @@ entry:
 	move.l	#_boot_stack_top,%sp	/* absolute; relocated above */
 	move.l	%d5,-(%sp)
 
+	move.l	%d5,%a0
+	move.l	(%a0),-(%sp)		/* start: D2 as saved on entry */
 	move.l	%a2,-(%sp)		/* base */
 	move.l	%d7,-(%sp)		/* baud */
 	move.l	%d6,-(%sp)		/* medium */
 	move.l	%a5,-(%sp)		/* ioreq */
 	move.l	%a6,-(%sp)		/* sysbase */
 	jsr	stage0_main
-	lea	20(%sp),%sp
+	lea	24(%sp),%sp
 
 	move.l	(%sp)+,%sp
 	movem.l	(%sp)+,%d2-%d7/%a2-%a6

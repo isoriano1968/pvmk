@@ -17,6 +17,7 @@
 #define O_HIGHSEQ	8
 #define O_TABLE		24
 #define O_BYTESIZE	324
+#define O_NAMECMT	328		/* DOS\6/7: name, then comment */
 #define O_NAME		432
 #define O_HASHCHAIN	496
 #define O_EXTENSION	504
@@ -29,20 +30,41 @@ rd32(const u8 *p)
 }
 
 static int
-upper(int c)
+upper(const struct ffs *fs, int c)
 {
-	return c >= 'a' && c <= 'z' ? c - 32 : c;
+	if (c >= 'a' && c <= 'z')
+		return c - 32;
+	if (fs->intl && c >= 0xe0 && c <= 0xfe && c != 0xf7)
+		return c - 32;			/* Latin-1 */
+	return c;
 }
 
 static int
-name_hash(const char *name, int len)
+name_hash(const struct ffs *fs, const char *name, int len)
 {
 	u32 h = (u32)len;
 	int i;
 
 	for (i = 0; i < len; i++)
-		h = (h * 13 + (u32)upper((u8)name[i])) & 0x7ff;
+		h = (h * 13 + (u32)upper(fs, (u8)name[i])) & 0x7ff;
 	return (int)(h % HT_SIZE);
+}
+
+void
+ffs_set_dostype(struct ffs *fs, u32 dostype)
+{
+	u32 v = dostype & 0xff;
+
+	fs->intl = v >= 2;
+	fs->longname = v >= 6;
+}
+
+/* the entry name in hbuf, a BSTR; *max its longest length */
+static const u8 *
+entry_name(const struct ffs *fs, u32 *max)
+{
+	*max = fs->longname ? 107 : 30;
+	return fs->hbuf + (fs->longname ? O_NAMECMT : O_NAME);
 }
 
 /* Read a checksummed header/list block of the expected type into hbuf. */
@@ -91,19 +113,20 @@ ffs_lookup(struct ffs *fs, const char *path, u32 *blk, int *is_dir)
 		while (*end && *end != '/')
 			end++;
 		len = (int)(end - path);
-		b = rd32(fs->hbuf + O_TABLE + name_hash(path, len) * 4);
+		b = rd32(fs->hbuf + O_TABLE + name_hash(fs, path, len) * 4);
 		while (b) {
 			const u8 *n;
+			u32 max;
 			int i;
 
 			if (guard++ > 4096)
 				return FFS_EBAD;
 			if ((err = read_meta(fs, b, T_HEADER)))
 				return err;
-			n = fs->hbuf + O_NAME;
+			n = entry_name(fs, &max);
 			if (n[0] == len) {
 				for (i = 0; i < len; i++)
-					if (upper(n[1 + i]) != upper((u8)path[i]))
+					if (upper(fs, n[1 + i]) != upper(fs, (u8)path[i]))
 						break;
 				if (i == len)
 					break;
@@ -183,15 +206,15 @@ ffs_list_dir(struct ffs *fs, u32 blk, ffs_dir_cb cb, void *arg)
 		int guard = 0;
 
 		while (b && guard++ < 4096) {
-			char name[31];
-			u32 n;
+			char name[108];
+			const u8 *s;
+			u32 n, max;
 
 			if ((err = read_meta(fs, b, T_HEADER)))
 				return err;
-			n = fs->hbuf[O_NAME];
-			if (n > 30)
-				n = 30;
-			memcpy(name, fs->hbuf + O_NAME + 1, n);
+			s = entry_name(fs, &max);
+			n = s[0] > max ? max : s[0];
+			memcpy(name, s + 1, n);
 			name[n] = 0;
 			cb(arg, name, rd32(fs->hbuf + O_BYTESIZE),
 			    sectype(fs) == ST_USERDIR, b);

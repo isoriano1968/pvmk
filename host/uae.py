@@ -7,6 +7,10 @@
       M1 acceptance test: boot to the shell, exercise commands, warm reset,
       check the previous-boot log; with --hdf also SCSI, partitions, ls and
       the AmigaOS boot request. Exit status 0 if all CPUs pass.
+  uae.py test-hd --pvmk-hdf FILE --adf FILE --hdf FILE [--cpu 030]
+      M11 test: boot SORIX-ILOM-LDOM from its PVMK partition (no floppy),
+      "update" a new boot volume over serial, reset into it, and decline
+      for "boot dh0" (works on a copy of the PVMK disk).
   uae.py test-gdb --gdb GDB [--cpu 030 040 060] [--adf FILE]
       GDB stub test: gdb-multiarch attaches to the stopped pvtest guest,
       sets a breakpoint, continues, steps and detaches; pvtest completes.
@@ -49,12 +53,12 @@ class Amiga:
     """FS-UAE process with its serial port attached to a pty we own."""
 
     def __init__(self, cpu, adf, log_path, hdf=None, hdf_ctrl="scsi",
-                 amix_hdf=None, amix_ro=True):
+                 amix_hdf=None, amix_ro=True, pvmk_hdf=None):
         kick = os.environ.get("KICKSTART", os.path.expanduser(
             "~/Documents/FS-UAE/Kickstarts/A3000.47.111.rom"))
         if not os.path.isfile(kick):
             sys.exit(f"uae.py: Kickstart ROM not found: {kick} (set KICKSTART)")
-        if not os.path.isfile(adf):
+        if adf and not os.path.isfile(adf):
             sys.exit(f"uae.py: no image: {adf} (run make)")
         self.master, slave = pty.openpty()
         tty.setraw(slave)
@@ -66,8 +70,8 @@ class Amiga:
         self.proc = subprocess.Popen(
             ["fs-uae", os.path.join(HERE, "uae", "a3000.fs-uae"),
              f"--kickstart_file={kick}",
-             f"--floppy_drive_0={os.path.abspath(adf)}",
              f"--serial_port={self.slave_name}"] + CPU_OPTS[cpu] +
+            ([f"--floppy_drive_0={os.path.abspath(adf)}"] if adf else []) +
             ([f"--hard_drive_0={os.path.abspath(hdf)}",
               "--hard_drive_0_type=rdb", f"--hard_drive_0_controller={hdf_ctrl}"]
              if hdf else []) +
@@ -75,6 +79,10 @@ class Amiga:
             ([f"--hard_drive_1={os.path.abspath(amix_hdf)}",
               "--hard_drive_1_type=rdb", "--hard_drive_1_controller=scsi6",
               f"--hard_drive_1_read_only={int(amix_ro)}"] if amix_hdf else []) +
+            # SORIX-ILOM-LDOM's own boot disk (PVMK partition) on SCSI ID 1
+            ([f"--hard_drive_2={os.path.abspath(pvmk_hdf)}",
+              "--hard_drive_2_type=rdb", "--hard_drive_2_controller=scsi1"]
+             if pvmk_hdf else []) +
             os.environ.get("UAE_EXTRA", "").split(),
             stdout=self.uae_log, stderr=subprocess.STDOUT)
         self.slave = slave
@@ -422,6 +430,64 @@ def cmd_test_gdb(args):
     return 0 if ok else 1
 
 
+def hd_one(cpu, adf, hdf, pvmk_hdf):
+    """M11: PVMK partition boot, update over serial, decline to DH0."""
+    import shutil
+    disk = f"build/pvmk-test-{cpu}.hdf"
+    shutil.copyfile(pvmk_hdf, disk)
+    # the new volume: the same image, a pvmk.conf with timeout=7 as a marker
+    conf = open("conf/pvmk.conf").read().replace("timeout=30", "timeout=7")
+    assert "timeout=7" in conf
+    open("build/pvmk-test.conf", "w").write(conf)
+    subprocess.run(["build/host/mkadf", "-o", "build/pvmk-test.adf", "-b",
+                    "build/bootblock.bin", "-i", "build/pvmk.bin", "-n", "PVMK",
+                    "-f", "pvmk.conf=build/pvmk-test.conf",
+                    "-f", "README=conf/README.disk"], check=True,
+                   stdout=subprocess.DEVNULL)
+    vol = open("build/pvmk-test.adf", "rb").read()
+    amiga = Amiga(cpu, None, f"build/serial-hd-{cpu}.log", hdf, pvmk_hdf=disk)
+    step = "boot from PVMK"
+    try:
+        amiga.expect(rb"BLCJ", 90)
+        amiga.expect(rb"boot medium hard disk", 30)
+        amiga.expect(rb"conf: PVMK:pvmk\.conf loaded", 30)
+        to_shell(amiga, 60)
+        step = "update"
+        amiga.send(f"update ser:#{len(vol)}\r".encode())
+        amiga.expect(rb"send \d+ bytes now", 20)
+        for i in range(0, len(vol), 256):
+            os.write(amiga.master, vol[i:i + 256])
+            amiga.read(0)
+        amiga.expect(rb"PVMK written and verified", 300)
+        amiga.expect(re.escape(PROMPT), 10)
+        step = "reset into the new volume"
+        amiga.send(b"reset\r")
+        amiga.expect(rb"BLCJ", 90)
+        amiga.expect(rb"boot medium hard disk", 30)
+        to_shell(amiga, 60)
+        amiga.send(b"conf\r")
+        amiga.expect(rb"from PVMK:pvmk\.conf[\s\S]*timeout=7", 15)
+        amiga.expect(re.escape(PROMPT), 10)
+        step = "boot dh0"
+        amiga.send(b"boot dh0\r")
+        amiga.expect(rb"BLCJ", 90)
+        amiga.expect(rb"declining to boot from the PVMK partition", 60)
+        print(f"uae.py test-hd: {cpu}: PASS (log: build/serial-hd-{cpu}.log)")
+        return True
+    except TimeoutError as e:
+        print(f"uae.py test-hd: {cpu}: FAIL at step '{step}' waiting for "
+              f"{e.args[0]!r} (log: build/serial-hd-{cpu}.log)")
+        return False
+    finally:
+        amiga.stop()
+
+
+def cmd_test_hd(args):
+    ok = all([hd_one(cpu, args.adf, args.hdf, args.pvmk_hdf)
+              for cpu in args.cpu])
+    return 0 if ok else 1
+
+
 def cmd_test(args):
     ok = all([test_one(cpu, args.adf, args.hdf, args.hdf_ctrl, args.amix_hdf)
               for cpu in args.cpu])
@@ -450,13 +516,18 @@ def main():
     t.add_argument("--hdf-ctrl", choices=["scsi", "uae"], default="scsi",
                    help="scsi: A3000 internal SCSI; uae: UAE's own driver "
                    "(uaehf.device), like accelerator/Zorro controllers")
+    h = sub.add_parser("test-hd")
+    h.add_argument("--cpu", nargs="+", choices=CPU_OPTS, default=["030"])
+    h.add_argument("--adf", default="build/pvmk.adf")
+    h.add_argument("--hdf", default="build/test.hdf")
+    h.add_argument("--pvmk-hdf", default="build/pvmk.hdf")
     g = sub.add_parser("test-gdb")
     g.add_argument("--cpu", nargs="+", choices=CPU_OPTS,
                    default=["030", "040", "060"])
     g.add_argument("--adf", default="build/pvmk.adf")
     g.add_argument("--gdb", default="gdb-multiarch", help="GDB with m68k")
     args = p.parse_args()
-    return {"run": cmd_run, "test": cmd_test,
+    return {"run": cmd_run, "test": cmd_test, "test-hd": cmd_test_hd,
             "test-gdb": cmd_test_gdb}[args.cmd](args)
 
 

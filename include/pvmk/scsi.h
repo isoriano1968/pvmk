@@ -41,5 +41,6 @@ extern struct sdisk sdisks[SCSI_MAXTARGET];
 
 int  disk_scan(int verbose);		/* number of devices found */
 int  disk_read(const struct sdisk *d, u32 lba, u32 count, void *buf);
+int  disk_write(const struct sdisk *d, u32 lba, u32 count, const void *buf);
 
 #endif /* PVMK_SCSI_H */

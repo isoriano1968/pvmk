@@ -12,6 +12,7 @@
 #define SERDAT		0xdff030	/* serial data (write) */
 #define SERPER		0xdff032	/* serial period */
 #define COLOR00		0xdff180
+#define VHPOSR		0xdff006	/* byte: vertical position, low 8 bits */
 #define CUSTOM_INTREQR	0xdff01e
 #define CUSTOM_INTENA	0xdff09a
 #define CUSTOM_INTREQ	0xdff09c

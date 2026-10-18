@@ -65,6 +65,13 @@ $(B)/%.o: %.S
 	@mkdir -p $(@D)
 	$(CC) $(ASFLAGS) -c $< -o $@
 
+# The objects that print the version: rebuilt when it changes.
+$(B)/version.stamp: FORCE
+	@mkdir -p $(@D)
+	@echo '$(VERSION)' | cmp -s - $@ || echo '$(VERSION)' > $@
+$(B)/stage0/stage0.o $(B)/svc/shell.o $(B)/svc/menu.o: $(B)/version.stamp
+FORCE:
+
 # Boot block: must be position independent, i.e. carry no relocations.
 $(B)/bootblock.bin: $(B)/boot/bootblock.o
 	@if $(READELF) -r $< | grep -q R_68K; then \
@@ -115,6 +122,12 @@ $(B)/test.hdf: $(B)/test-dh0.img $(B)/test-work.img $(B)/host/mkhdf
 	$(B)/host/mkhdf -o $@ -p DH0,image=$(B)/test-dh0.img,pri=0 \
 		-p WORK,image=$(B)/test-work.img,pri=-5 -p UNIX,size=1M,dostype=0x554e4901
 
+# SORIX-ILOM-LDOM's own boot disk: the boot volume (pvmk.adf) on an RDB
+# partition PVMK, bootable through its boot block (M11). On the Z3660 SD card
+# it is one more HDF; later versions go onto it with the shell's "update".
+$(B)/pvmk.hdf: $(B)/pvmk.adf $(B)/host/mkhdf
+	$(B)/host/mkhdf -o $@ -p PVMK,image=$(B)/pvmk.adf,pri=4,bootblocks=2,pvbb
+
 hdf: $(B)/test.hdf
 
 verify: $(B)/pvmk.adf
@@ -155,9 +168,11 @@ run-amix: $(B)/pvmk.adf $(B)/amix-test.hdf
 	$(PYTHON) -I host/uae.py run --cpu $(UAE_CPU) --adf $(B)/pvmk.adf \
 		--amix-hdf $(B)/amix-test.hdf --amix-rw
 
-test: $(B)/pvmk.adf $(B)/test.hdf
+test: $(B)/pvmk.adf $(B)/test.hdf $(B)/pvmk.hdf
 	$(PYTHON) -I host/uae.py test --cpu $(UAE_CPUS) --adf $(B)/pvmk.adf \
 		--hdf $(B)/test.hdf $(AMIX_OPT)
+	$(PYTHON) -I host/uae.py test-hd --cpu 030 --pvmk-hdf $(B)/pvmk.hdf \
+		--hdf $(B)/test.hdf
 	$(PYTHON) -I host/uae.py test --cpu 030 --adf $(B)/pvmk.adf \
 		--hdf $(B)/test.hdf --hdf-ctrl uae
 	$(if $(GDB),$(PYTHON) -I host/uae.py test-gdb --cpu $(UAE_CPUS) \

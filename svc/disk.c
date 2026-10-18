@@ -131,3 +131,27 @@ disk_read(const struct sdisk *d, u32 lba, u32 count, void *buf)
 	}
 	return err;
 }
+
+int
+disk_write(const struct sdisk *d, u32 lba, u32 count, const void *buf)
+{
+	const u8 *p = buf;
+	int err = SCSI_OK, tries;
+
+	if (!d->ready)
+		return SCSI_EIO;
+	while (count && !err) {
+		u32 n = count > SCSI_DMA_BLOCKS ? SCSI_DMA_BLOCKS : count;
+		u8 cdb[10] = { 0x2a, 0, (u8)(lba >> 24), (u8)(lba >> 16),
+		    (u8)(lba >> 8), (u8)lba, 0, (u8)(n >> 8), (u8)n, 0 };
+
+		for (tries = 0; tries < 3; tries++)
+			if ((err = scsi_cmd(d->target, d->lun, cdb, (void *)p,
+			    n * 512, 0)) != SCSI_ECHECK)
+				break;
+		lba += n;
+		count -= n;
+		p += n * 512;
+	}
+	return err;
+}

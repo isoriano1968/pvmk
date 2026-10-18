@@ -83,23 +83,32 @@ name_is(const char *strtab, u32 strsize, u32 name, const char *want)
 	return 0;
 }
 
+/*
+ * Where the kernel runs: the start of the largest fast RAM region below
+ * 1 GB (the 68040/68060 kernel maps 0-1 GB transparently and must lie
+ * inside; Zorro III RAM starts at 0x40000000), else of the largest one.
+ */
 u32
 amix_bind_address(void)
 {
 	u32 i, base = 0, best = 0;
+	int pass;
 
-	for (i = 0; i < bootcap.nmem; i++) {
-		const struct memregion *m = &bootcap.mem[i];
-		u32 size;
+	for (pass = 0; pass < 2 && !base; pass++)
+		for (i = 0; i < bootcap.nmem; i++) {
+			const struct memregion *m = &bootcap.mem[i];
+			u32 size;
 
-		if (m->attr & 0x0002)		/* MEMF_CHIP */
-			continue;
-		size = m->upper - (m->lower & ~0xffu);
-		if (size > best) {
-			best = size;
-			base = m->lower & ~0xffu;
+			if (m->attr & 0x0002)		/* MEMF_CHIP */
+				continue;
+			if (!pass && m->upper > 0x40000000)
+				continue;
+			size = m->upper - (m->lower & ~0xffu);
+			if (size > best) {
+				best = size;
+				base = m->lower & ~0xffu;
+			}
 		}
-	}
 	return base;
 }
 

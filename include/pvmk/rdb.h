@@ -51,5 +51,7 @@ void dostype_str(u32 dostype, char *buf);	/* "DOS\1" */
 
 /* Read count blocks at a partition-relative block number. */
 int  part_read(const struct partition *p, u32 blk, u32 count, void *buf);
+int  part_write(const struct partition *p, u32 blk, u32 count,
+	const void *buf);
 
 #endif /* PVMK_RDB_H */

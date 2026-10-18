@@ -57,6 +57,9 @@ struct conf {
 
 struct bootcap {
 	u32 medium;			/* BOOT_* */
+	u32 boot_part;			/* boot volume's first block on its
+					 * device: 0 floppy, else the PVMK
+					 * partition's start */
 	u16 exec_ver, exec_rev, softver, attn;
 	u8 vblank;
 	u32 eclock;

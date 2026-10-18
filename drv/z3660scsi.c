@@ -18,6 +18,7 @@
 #define STAGING_OFFSET	0x80000
 #define MAX_XFER	65536
 
+#define R_WRITE		0x00		/* block write: LBA in WRITE_ADDR1 */
 #define R_DRVNUM	0x08
 #define R_DRVTYPE	0x0c
 #define R_READ_ADDR1	0x20		/* byte offset (low 32 bits) */
@@ -28,6 +29,10 @@
 #define R_READBYTES	0x88
 #define R_DRVNUMX	0x90
 #define R_USED_DMA	0x9c
+#define R_WRITE_ADDR1	0x240		/* LBA */
+#define R_WRITE_ADDR2	0x244		/* length */
+#define R_WRITE_ADDR3	0x248		/* buffer address */
+#define DIRECT_BASE	0x08000000	/* below: not the card's RAM, staged */
 #define R_BLOCKSIZE0	0x200		/* units 0-7 */
 #define R_BLOCKS0	0x220
 #define R_BLOCKSIZE10	0x250		/* units 10-17 */
@@ -51,6 +56,22 @@ z3660_init(void)
 		if (PEEK16(cd, 20) == Z3660_MANUFACTURER &&
 		    PEEK8(cd, 17) == Z3660_PRODUCT) {
 			board = PEEK32(cd, 32);	/* cd_BoardAddr */
+			return 0;
+		}
+	}
+	/*
+	 * Not autoconfigured (autoconfig_rtg NO): the combo window is at its
+	 * fixed address. Only probed when the Z3660's RAM board is in the
+	 * chain, so a machine without a Z3660 never touches it.
+	 */
+	for (i = 0; i < bootcap.ncd; i++) {
+		const u8 *cd = bootcap.configdev[i];
+
+		if (PEEK16(cd, 20) == Z3660_MANUFACTURER &&
+		    PEEK8(cd, 17) == Z3660_RAM_PRODUCT) {
+			board = Z3660_FIXED;
+			kprintf("z3660: combo board not autoconfigured, using the "
+			    "fixed window at %08x\n", board);
 			return 0;
 		}
 	}
@@ -136,6 +157,38 @@ z3660_read(u32 unit, u32 lba, u32 count, void *buf)
 		if (REG(R_USED_DMA))
 			memcpy(p, (const void *)(uintptr_t)(board + STAGING_OFFSET),
 			    n * 512);
+		p += n * 512;
+		lba += n;
+		count -= n;
+	}
+	return 0;
+}
+
+/*
+ * Block write, as the AMIX z3660scsi driver does it (P_WRITE, LBA in
+ * WRITE_ADDR1). A buffer outside the card's own RAM is copied to the
+ * staging buffer first. Synchronous like the read.
+ */
+int
+z3660_write(u32 unit, u32 lba, u32 count, const void *buf)
+{
+	const u8 *p = buf;
+
+	if (!board || !valid_unit(unit) || !z3660_units[unit].present ||
+	    z3660_units[unit].bsize != 512 ||
+	    lba + count > z3660_units[unit].blocks)
+		return -1;
+	while (count) {
+		u32 n = count > MAX_XFER / 512 ? MAX_XFER / 512 : count;
+
+		if ((u32)(uintptr_t)p < DIRECT_BASE)
+			memcpy((void *)(uintptr_t)(board + STAGING_OFFSET), p,
+			    n * 512);
+		REG(R_DRVNUMX) = unit;
+		REG(R_WRITE_ADDR1) = lba;
+		REG(R_WRITE_ADDR2) = n * 512;
+		REG(R_WRITE_ADDR3) = (u32)(uintptr_t)p;
+		REG(R_WRITE) = unit;		/* the write completes the op */
 		p += n * 512;
 		lba += n;
 		count -= n;

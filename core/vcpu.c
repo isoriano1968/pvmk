@@ -648,6 +648,25 @@ kick_carve(void)
 	}
 }
 
+/*
+ * CINV/CPUSH for the guest: run it as written, on the line or page the
+ * guest names (physical addresses, which are the real ones). An
+ * invalidate that could discard SORIX-ILOM-LDOM's own data (a line or page
+ * in the hole, or the whole data cache) pushes instead.
+ */
+static void
+cache_guest(struct excregs *r, u16 op)
+{
+	u32 sel = (op >> 3) & 31, scope = op & 0x18, pa = r->a[op & 7];
+	u32 lo = pa & (scope == 0x10 ? ~0xfffu : ~0xfu);
+	u32 hi = lo + (scope == 0x10 ? 0x1000 : 0x10);
+
+	if (!(op & 0x20) && (op & 0x40) &&	/* CINV of the data cache */
+	    (scope == 0x18 || (hi > bootcap.hole_base && lo < bootcap.hole_top)))
+		sel |= 4;			/* push as well */
+	cache_op(sel, pa);
+}
+
 static void
 idle(struct excregs *r)
 {
@@ -1160,7 +1179,7 @@ emulate(struct excregs *r)
 		if (fsave_frestore(r, op, &pc))
 			return FAULT;
 	} else if ((op & 0xff00) == 0xf400 && cpuinfo.model >= 40) {
-		cache_push_all(cpuinfo.model);		/* CINV / CPUSH */
+		cache_guest(r, op);			/* CINV / CPUSH */
 	} else if ((op & 0xffe0) == 0xf500 && cpuinfo.model >= 40) {
 		/* PFLUSH (An), PFLUSHN, PFLUSHA; right after MOVEC URP (a
 		 * context switch) the user view is new already */

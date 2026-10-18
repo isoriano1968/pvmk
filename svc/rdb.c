@@ -110,6 +110,22 @@ dostype_kind(u32 t)
 }
 
 int
+part_write(const struct partition *p, u32 b, u32 count, const void *buf)
+{
+	if (b + count > p->nblocks)
+		return -1;
+	switch (p->native) {
+	case NATIVE_A3000:
+		if (p->unit >= SCSI_MAXTARGET)
+			return -1;
+		return disk_write(&sdisks[p->unit], p->start + b, count, buf);
+	case NATIVE_Z3660:
+		return z3660_write(p->unit, p->start + b, count, buf);
+	}
+	return -1;
+}
+
+int
 part_read(const struct partition *p, u32 b, u32 count, void *buf)
 {
 	if (b + count > p->nblocks)

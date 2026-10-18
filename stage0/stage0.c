@@ -58,15 +58,17 @@ u32 lib_call(void *base, s32 lvo, u32 d0, u32 d1, u32 a0, u32 a1);
 u32 sorix_guest(void *sysbase);		/* libcall.S: 'SORX' under SORIX-ILOM-LDOM */
 void takeover(const struct takeover_args *ta, void *sysbase)
     __attribute__((noreturn));
-int stage0_main(void *sysbase, void *ioreq, u32 medium, u32 baud, u8 *base);
+int stage0_main(void *sysbase, void *ioreq, u32 medium, u32 baud, u8 *base,
+    u32 start);
 
 struct bootcap bootcap;
 static struct takeover_args ta;
 static char confbuf[2048];
 
-struct floppy {
+struct floppy {				/* the boot volume, floppy or partition */
 	void *sysbase;
 	u8 *io;
+	u32 off;			/* its first block on the device */
 };
 
 static int
@@ -77,7 +79,7 @@ floppy_read(void *ctx, u32 blk, void *buf)
 	PEEK16(f->io, IO_COMMAND) = CMD_READ;
 	PEEK32(f->io, IO_DATA) = (u32)(uintptr_t)buf;
 	PEEK32(f->io, IO_LENGTH) = FFS_BSIZE;
-	PEEK32(f->io, IO_OFFSET) = blk * FFS_BSIZE;
+	PEEK32(f->io, IO_OFFSET) = (f->off + blk) * FFS_BSIZE;
 	lib_call(f->sysbase, LVO_DoIO, 0, 0, 0, (u32)(uintptr_t)f->io);
 	return PEEK8(f->io, IO_ERROR) ? -1 : 0;
 }
@@ -156,22 +158,41 @@ show_capture(void)
 	}
 }
 
+/* Is a inside an autoconfigured board (whose memory a reset takes away)? */
+static int
+on_board(u32 a)
+{
+	u32 i, b;
+
+	for (i = 0; i < bootcap.ncd; i++) {
+		b = PEEK32(bootcap.configdev[i], 32);	/* cd_BoardAddr */
+		if (a >= b && a - b < PEEK32(bootcap.configdev[i], 36))
+			return 1;
+	}
+	return 0;
+}
+
 /*
  * Reserve HOLE_SIZE at the top of the largest fast RAM region, avoiding the
- * running image. Falls back to a reverse allocation if that range is taken.
+ * running image; preferably not Zorro RAM, which goes away when the boards
+ * are reset for an AmigaOS guest's autoconfig. Falls back to a reverse
+ * allocation if that range is taken.
  */
 static int
 reserve_hole(void *sysbase, u8 *base, u32 alloc)
 {
 	struct bootcap *bc = &bootcap;
-	u32 best = 0, i, top, hb, r;
+	u32 i, top, hb, r;
+	int best = -1, pass;
 
-	for (i = 0; i < bc->nmem; i++)
-		if ((bc->mem[i].attr & MEMF_FAST) &&
-		    bc->mem[i].upper - bc->mem[i].lower >
-		    bc->mem[best].upper - bc->mem[best].lower)
-			best = i;
-	if (!(bc->mem[best].attr & MEMF_FAST)) {
+	for (pass = 0; pass < 2 && best < 0; pass++)	/* 0: not on a board */
+		for (i = 0; i < bc->nmem; i++)
+			if ((bc->mem[i].attr & MEMF_FAST) &&
+			    (pass || !on_board(bc->mem[i].lower)) &&
+			    (best < 0 || bc->mem[i].upper - bc->mem[i].lower >
+			    bc->mem[best].upper - bc->mem[best].lower))
+				best = (int)i;
+	if (best < 0) {
 		kprintf("stage0: no fast RAM found\n");
 		return -1;
 	}
@@ -278,6 +299,18 @@ name_eq(const char *a, const char *b)
 		if ((*a | 0x20) != (*b | 0x20))
 			return 0;
 	return *a == *b;
+}
+
+/* priority of a recorded boot node, -129 if there is none of that name */
+static int
+bootnode_pri(const char *name)
+{
+	u32 i;
+
+	for (i = 0; i < bootcap.nbootnodes; i++)
+		if (name_eq(bootcap.bootnodes[i].name, name))
+			return bootcap.bootnodes[i].pri;
+	return -129;
 }
 
 /*
@@ -488,6 +521,24 @@ silence_boot_alert(void *sysbase)
 }
 
 /*
+ * Hold a colour for about three seconds, so a boot that ends here can be
+ * told apart without a serial terminal.
+ */
+static void
+hold_colour(u16 c)
+{
+	volatile u8 *vpos = (volatile u8 *)VHPOSR;
+	int n;
+
+	for (n = 0; n < 300; n++) {		/* line 16 and 272: 2 per frame */
+		while (*vpos != 0x10)		/* the Copper may set it too */
+			REG16(COLOR00) = c;
+		while (*vpos == 0x10)
+			REG16(COLOR00) = c;
+	}
+}
+
+/*
  * Booting another device: strap tries the boot nodes in priority order and,
  * when a boot block declines (returns an error), goes on with the next one
  * in its own order (reordering the list at this point has no effect). So
@@ -495,19 +546,28 @@ silence_boot_alert(void *sysbase)
  * the shell has checked is the one requested; nothing is left in memory.
  */
 static void
-decline_boot(void *sysbase, void *ioreq, const char *name)
+motor_off(void *sysbase, void *ioreq)
 {
+	if (bootcap.medium != BOOT_FLOPPY)
+		return;
 	PEEK16(ioreq, IO_COMMAND) = TD_MOTOR;
 	PEEK32(ioreq, IO_LENGTH) = 0;
 	lib_call(sysbase, LVO_DoIO, 0, 0, 0, (u32)(uintptr_t)ioreq);
+}
+
+static void
+decline_boot(void *sysbase, void *ioreq, const char *name)
+{
+	motor_off(sysbase, ioreq);
 	if (bootcap.scsi_chip)
 		lib_call(sysbase, LVO_FreeMem, SCSI_DMA_BLOCKS * 512, 0, 0,
 		    bootcap.scsi_chip);
 	lib_call(sysbase, LVO_FreeMem, bootcap.hole_alloc_size, 0, 0,
 	    bootcap.hole_alloc);
 	silence_boot_alert(sysbase);
-	kprintf("stage0: declining to boot from the floppy; strap continues "
-	    "with the next boot device (%s is requested)\n", name);
+	kprintf("stage0: declining to boot from the %s; strap continues "
+	    "with the next boot device (%s is requested)\n",
+	    bootcap.medium == BOOT_FLOPPY ? "floppy" : "PVMK partition", name);
 	while (!(REG16(SERDATR) & (1 << SERDATR_TSRE)))
 		;
 }
@@ -546,9 +606,10 @@ add_file(void *arg, const char *name, u32 size, int is_dir, u32 blk)
 }
 
 static void
-read_floppy(void *sysbase, void *ioreq)
+read_bootvol(void *sysbase, void *ioreq)
 {
-	struct floppy fl = { sysbase, ioreq };
+	struct floppy fl = { sysbase, ioreq, bootcap.boot_part };
+	const char *vol = bootcap.medium == BOOT_FLOPPY ? "DF0" : "PVMK";
 	struct ffs fs;
 	struct dirwalk w = { .prefix = "" };
 	char prefix[sizeof(bootcap.files[0].path) + 1];
@@ -558,18 +619,19 @@ read_floppy(void *sysbase, void *ioreq)
 	fs.read = floppy_read;
 	fs.ctx = &fl;
 	fs.root = FLOPPY_ROOT;
+	ffs_set_dostype(&fs, 0x444f5301);	/* our floppy: DOS\1 */
 
 	err = ffs_lookup(&fs, "pvmk.conf", &blk, &is_dir);
 	if (!err && !is_dir)
 		err = ffs_read_file(&fs, blk, confbuf, sizeof(confbuf) - 1, &size);
 	if (err) {
-		kprintf("stage0: conf: DF0:pvmk.conf: %s, using defaults\n",
+		kprintf("stage0: conf: %s:pvmk.conf: %s, using defaults\n", vol,
 		    ffs_strerror(err));
 	} else {
 		confbuf[size] = 0;
 		conf_parse(&bootcap.conf, confbuf, size);
 		bootcap.conf_loaded = 1;
-		kprintf("stage0: conf: DF0:pvmk.conf loaded (%u bytes)\n", size);
+		kprintf("stage0: conf: %s:pvmk.conf loaded (%u bytes)\n", vol, size);
 	}
 
 	err = ffs_list_dir(&fs, FLOPPY_ROOT, add_file, &w);
@@ -586,17 +648,18 @@ read_floppy(void *sysbase, void *ioreq)
 		err = ffs_list_dir(&fs, w.dirs[i].blk, add_file, &w);
 	}
 	if (err)
-		kprintf("stage0: floppy directory: %s\n", ffs_strerror(err));
-	kprintf("stage0: floppy: %u entries cached\n", bootcap.nfiles);
-
-	PEEK16(ioreq, IO_COMMAND) = TD_MOTOR;
-	PEEK32(ioreq, IO_LENGTH) = 0;
-	lib_call(sysbase, LVO_DoIO, 0, 0, 0, (u32)(uintptr_t)ioreq);
-	kprintf("stage0: floppy motor off\n");
+		kprintf("stage0: %s: directory: %s\n", vol, ffs_strerror(err));
+	kprintf("stage0: %s: %u entries cached\n", bootcap.medium == BOOT_FLOPPY ?
+	    "floppy" : "PVMK", bootcap.nfiles);
+	if (bootcap.medium == BOOT_FLOPPY) {
+		motor_off(sysbase, ioreq);
+		kprintf("stage0: floppy motor off\n");
+	}
 }
 
 int
-stage0_main(void *sysbase, void *ioreq, u32 medium, u32 baud, u8 *base)
+stage0_main(void *sysbase, void *ioreq, u32 medium, u32 baud, u8 *base,
+    u32 start)
 {
 	u32 bss_end = PEEK32(base, PVMK_O_BSSEND);
 	u32 nrel = PEEK32(base, PVMK_O_RELCNT);
@@ -619,15 +682,16 @@ stage0_main(void *sysbase, void *ioreq, u32 medium, u32 baud, u8 *base)
 	if (sorix_guest(sysbase) == 0x534f5258) {
 		kprintf("\n" SORIX_NAME ": this AmigaOS runs under SORIX-ILOM-LDOM; "
 		    "declining the floppy, it boots from the next device\n");
-		PEEK16(ioreq, IO_COMMAND) = TD_MOTOR;
-		PEEK32(ioreq, IO_LENGTH) = 0;
-		lib_call(sysbase, LVO_DoIO, 0, 0, 0, (u32)(uintptr_t)ioreq);
+		bootcap.medium = medium;
+		motor_off(sysbase, ioreq);
 		silence_boot_alert(sysbase);
+		hold_colour(0x80f);		/* violet: declined, a guest */
 		return BOOTBLOCK_DECLINE;
 	}
 
 	conf_defaults(&bootcap.conf);
 	capture(sysbase, medium);
+	bootcap.boot_part = start - 2;		/* the image is volume block 2 */
 	if (reserve_hole(sysbase, base, len))
 		return 0;	/* fail safe: let AmigaOS boot */
 	time_init(bootcap.hsync_hz);
@@ -652,8 +716,21 @@ stage0_main(void *sysbase, void *ioreq, u32 medium, u32 baud, u8 *base)
 		if (bootreq_take(bootcap.hole_top - LOG_AREA_SIZE, name) ==
 		    BOOTREQ_AMIGAOS) {
 			kprintf("stage0: boot request: AmigaOS from %s\n", name);
-			if (bootnodes(sysbase, name) == 0 && medium == BOOT_FLOPPY) {
+			if (bootnodes(sysbase, name) == 0) {
+				/*
+				 * A PVMK boot partition before the target in
+				 * strap's order boots a SORIX-ILOM-LDOM next:
+				 * leave the request for it to decline too.
+				 */
+				if (medium == BOOT_FLOPPY &&
+				    bootnode_pri("PVMK") >= bootnode_pri(name)) {
+					bootreq_set(bootcap.hole_top - LOG_AREA_SIZE,
+					    BOOTREQ_AMIGAOS, name);
+					kprintf("stage0: the PVMK partition boots "
+					    "first; it declines as well\n");
+				}
 				decline_boot(sysbase, ioreq, name);
+				hold_colour(0x088);	/* teal: declined, request */
 				return BOOTBLOCK_DECLINE;
 			}
 			kprintf("stage0: cannot boot %s, staying in "
@@ -664,8 +741,7 @@ stage0_main(void *sysbase, void *ioreq, u32 medium, u32 baud, u8 *base)
 	kprintf("stage0: hole %08x-%08x (%uK)\n", bootcap.hole_base,
 	    bootcap.hole_top - 1, HOLE_SIZE >> 10);
 
-	if (medium == BOOT_FLOPPY)
-		read_floppy(sysbase, ioreq);
+	read_bootvol(sysbase, ioreq);
 	if (bootcap.conf.display) {
 		capture_font(sysbase);
 		bootcap.disp_chip = bootcap.font_ok ? lib_call(sysbase,

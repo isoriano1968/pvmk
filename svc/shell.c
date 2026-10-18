@@ -13,6 +13,7 @@
 #include "pvmk/display.h"
 #include "pvmk/ffs.h"
 #include "pvmk/gdb.h"
+#include "pvmk/image.h"
 #include "pvmk/keyboard.h"
 #include "pvmk/kprintf.h"
 #include "pvmk/layout.h"
@@ -266,8 +267,9 @@ cmd_conf(int argc, char **argv)
 {
 	(void)argc;
 	(void)argv;
-	kprintf("# %s\n", bootcap.conf_loaded ? "from DF0:pvmk.conf" :
-	    "built-in defaults");
+	kprintf("# %s\n", !bootcap.conf_loaded ? "built-in defaults" :
+	    bootcap.medium == BOOT_FLOPPY ? "from DF0:pvmk.conf" :
+	    "from PVMK:pvmk.conf");
 	conf_show(&bootcap.conf);
 }
 
@@ -410,6 +412,15 @@ ls_part(const char *arg)
 	fs.read = part_block;
 	fs.ctx = p;
 	fs.root = (p->nblocks + 1) / 2;
+	/*
+	 * The variant is the one formatted, in the partition's boot block
+	 * (FFS goes by that too): a DOS\3 in the RDB may hold DOS\7.
+	 */
+	if (!part_block(p, 0, fs.hbuf) && fs.hbuf[0] == 'D' &&
+	    fs.hbuf[1] == 'O' && fs.hbuf[2] == 'S' && fs.hbuf[3] <= 7)
+		ffs_set_dostype(&fs, 0x444f5300 | fs.hbuf[3]);
+	else
+		ffs_set_dostype(&fs, p->dostype);
 	err = ffs_lookup(&fs, path, &blk, &is_dir);
 	if (!err && is_dir)
 		err = ffs_list_dir(&fs, blk, ls_entry, NULL);
@@ -602,11 +613,55 @@ cmd_go(int argc, char **argv)
 	kprintf("go: returned %08x\n", (u32)call_addr(addr));
 }
 
+/*
+ * Receive len bytes from the serial port into p, as fast as they come: a
+ * tight poll of SERDATR (Paula holds one byte), with the overrun bit
+ * checked so a lost byte is reported, not stored. 10 s without a byte
+ * is a timeout.
+ */
+static int
+ser_receive(u8 *p, u32 len)
+{
+	u32 i = 0, idle = 0, s0, ms0, s, ms;
+	u16 v;
+
+	kprintf("load: send %u bytes now (10 s timeout)\n", len);
+	while (!(REG16(SERDATR) & (1 << SERDATR_TSRE)))
+		;
+	time_now(&s0, &ms0);
+	while (i < len) {
+		v = REG16(SERDATR);
+		if (v & (1 << SERDATR_RBF)) {
+			REG16(CUSTOM_INTREQ) = 0x0800;	/* clear RBF */
+			if (v & 0x8000) {		/* OVRUN */
+				kprintf("load: serial overrun at byte %u of %u\n",
+				    i, len);
+				return -1;
+			}
+			p[i++] = (u8)v;
+			idle = 0;
+			continue;
+		}
+		if (++idle == 1)
+			time_now(&s0, &ms0);	/* idle since now */
+		else if (!(idle & 0xffff)) {
+			time_now(&s, &ms);
+			if ((s - s0) * 1000 + ms - ms0 >= 10000) {
+				kprintf("load: timeout after %u of %u bytes\n",
+				    i, len);
+				return -1;
+			}
+		}
+	}
+	return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* AMIX kernels                                                        */
 
 static struct amix_kernel amixk;
 static u8 *amix_image;			/* relocated ELF file, or NULL */
+static u32 amix_mem_cap;		/* boot -m: bytes for AMIX, 0 = all */
 
 /*
  * Load and relocate an AMIX kernel from dev:path (default path
@@ -617,45 +672,70 @@ static int
 amix_load(const char *arg)
 {
 	static struct ufs fs;
-	struct partition *p;
+	struct partition *p = NULL;
 	struct ufs_stat st;
-	const char *path;
-	u32 base, buf, s0, ms0, s1, ms1, ms;
-	int err;
+	const char *path = "";
+	u32 base, buf, top, i, size, s0, ms0, s1, ms1, ms;
+	int err, ser = arg[0] == 's' && arg[1] == 'e' && arg[2] == 'r' &&
+	    arg[3] == ':';
 
 	amix_image = NULL;
-	if (!(p = dev_path("load", arg, &path)) || ufs_open("load", p, &fs))
-		return -1;
-	if (!*path)
-		path = AMIX_DEFAULT_PATH;
-	if ((err = ufs_lookup(&fs, path, 1, &st))) {
-		kprintf("load: %s:%s: %s\n", p->name, path, ufs_strerror(err));
-		return -1;
-	}
-	if ((st.mode & UFS_IFMT) != UFS_IFREG) {
-		kprintf("load: %s:%s: not a regular file\n", p->name, path);
-		return -1;
+	if (ser) {			/* ser:<size>: the file comes over serial */
+		if (!need_num((char *)arg + 4, &size, "size"))
+			return -1;
+	} else {
+		if (!(p = dev_path("load", arg, &path)) ||
+		    ufs_open("load", p, &fs))
+			return -1;
+		if (!*path)
+			path = AMIX_DEFAULT_PATH;
+		if ((err = ufs_lookup(&fs, path, 1, &st))) {
+			kprintf("load: %s:%s: %s\n", p->name, path,
+			    ufs_strerror(err));
+			return -1;
+		}
+		if ((st.mode & UFS_IFMT) != UFS_IFREG) {
+			kprintf("load: %s:%s: not a regular file\n", p->name,
+			    path);
+			return -1;
+		}
+		size = st.size;
 	}
 	base = amix_bind_address();
-	buf = (bootcap.hole_base - st.size - 0x10000) & ~0xffffu;
-	if (!base || buf <= base + st.size) {
+	top = bootcap.hole_base;		/* the file: below the hole, */
+	for (i = 0; i < bootcap.nmem; i++)	/* or at the top of the kernel's */
+		if (base >= bootcap.mem[i].lower - 0x100 &&	/* region */
+		    base < bootcap.mem[i].upper &&
+		    !(top > base && top <= bootcap.mem[i].upper))
+			top = bootcap.mem[i].upper;
+	buf = (top - size - 0x10000) & ~0xffffu;
+	if (!base || !size || buf <= base + size || buf > top) {
 		kprintf("load: not enough fast RAM for a %u byte kernel\n",
-		    st.size);
+		    size);
 		return -1;
 	}
-	kprintf("load: %s:%s, %u bytes, into %08x\n", p->name, path, st.size,
-	    buf);
-	time_now(&s0, &ms0);
-	if ((err = ufs_read_file(&fs, &st, 0, (void *)(uintptr_t)buf,
-	    st.size))) {
-		kprintf("load: read error: %s\n", ufs_strerror(err));
-		return -1;
+	if (ser) {
+		kprintf("load: serial, %u bytes, into %08x\n", size, buf);
+		time_now(&s0, &ms0);
+		if (ser_receive((u8 *)(uintptr_t)buf, size))
+			return -1;
+		kprintf("load: crc32 %08x\n", crc32((u8 *)(uintptr_t)buf,
+		    size));
+	} else {
+		kprintf("load: %s:%s, %u bytes, into %08x\n", p->name, path,
+		    size, buf);
+		time_now(&s0, &ms0);
+		if ((err = ufs_read_file(&fs, &st, 0, (void *)(uintptr_t)buf,
+		    size))) {
+			kprintf("load: read error: %s\n", ufs_strerror(err));
+			return -1;
+		}
 	}
 	time_now(&s1, &ms1);
 	ms = (s1 - s0) * 1000 + ms1 - ms0;
 	kprintf("load: read in %u ms (%u KB/s)\n", ms,
-	    ms ? st.size / ms * 1000 / 1024 : 0);
-	if (amix_relocate((u8 *)(uintptr_t)buf, st.size, base, &amixk))
+	    ms ? size / ms * 1000 / 1024 : 0);
+	if (amix_relocate((u8 *)(uintptr_t)buf, size, base, &amixk))
 		return -1;
 	if (amixk.end > buf) {
 		kprintf("load: kernel (to %08x) would overlap its image at "
@@ -753,6 +833,18 @@ amix_start(int pv)
 		memcpy(bi->autocon[i], bootcap.configdev[i], sizeof(bi->autocon[0]));
 	for (i = 0; i < bootcap.nmem && i < AMIX_NAUTO; i++)
 		memcpy(bi->memory[i], bootcap.memhdr[i], sizeof(bi->memory[0]));
+	for (i = 0; amix_mem_cap && i < bootcap.nmem && i < AMIX_NAUTO; i++) {
+		u8 *mh = bi->memory[i];		/* boot -m: the kernel's region */
+		u32 lo = *(u32 *)(mh + MH_LOWER), up = *(u32 *)(mh + MH_UPPER);
+
+		if (amixk.bd.tvaddr >= (lo & ~0xffu) && amixk.bd.tvaddr < up &&
+		    up - lo > amix_mem_cap) {
+			*(u32 *)(mh + MH_UPPER) = lo + amix_mem_cap;
+			*(u32 *)(mh + MH_FREE) = amix_mem_cap;
+			kprintf("boot: AMIX memory %08x-%08x (boot -m %u)\n", lo,
+			    lo + amix_mem_cap - 1, amix_mem_cap >> 20);
+		}
+	}
 	bi->bootdata = amixk.bd;
 
 	h->sp = bootcap.scsi_chip + SCSI_DMA_BLOCKS * 512 - 16;
@@ -770,6 +862,18 @@ amix_start(int pv)
 	h->dsize = amixk.bd.dsize;
 	h->cpu = cpuinfo.model;
 
+	/*
+	 * 68060: the state SetPatch's 68060.library leaves, which AMIX's
+	 * 040/060 port expects (its loader runs after SetPatch): FPU on
+	 * (PCR DFP clear), superscalar dispatch on (ESS). A guest starts
+	 * with this PCR too.
+	 */
+	if (cpuinfo.model == 60 && (cpuinfo.pcr & 3) != 1) {
+		cpuinfo.pcr = (cpuinfo.pcr & ~3u) | 1;
+		pcr_write(cpuinfo.pcr);
+		kprintf("boot: 68060 PCR %08x: FPU and superscalar dispatch on, "
+		    "as after SetPatch\n", cpuinfo.pcr);
+	}
 	if (pv)
 		amix_start_pv(bi, h->sp);
 	if (amixk.cputype >= amixk.bd.dvaddr &&
@@ -822,8 +926,8 @@ static void
 cmd_load(int argc, char **argv)
 {
 	if (argc < 2) {
-		kprintf("usage: load dev:[path]   (AMIX kernel, default %s)\n",
-		    AMIX_DEFAULT_PATH);
+		kprintf("usage: load dev:[path] | ser:<bytes>   (AMIX kernel, "
+		    "default %s)\n", AMIX_DEFAULT_PATH);
 		return;
 	}
 	amix_load(argv[1]);
@@ -1088,8 +1192,9 @@ name_eq(const char *a, const char *b)
 }
 
 /*
- * The floppy can only decline its boot; strap then boots the next bootable
- * device in its priority order. Returns the name of that device, or NULL.
+ * SORIX-ILOM-LDOM's boot floppy or PVMK partition can only decline its boot;
+ * strap then boots the next bootable device in its priority order. Returns
+ * the name of that device, or NULL.
  */
 static const char *
 next_boot_device(void)
@@ -1100,8 +1205,9 @@ next_boot_device(void)
 	for (i = 0; i < bootcap.nbootnodes; i++) {
 		const struct bc_bootnode *b = &bootcap.bootnodes[i];
 
-		if (name_eq(b->name, "DF0") || b->pri == -128)
-			continue;
+		if (name_eq(b->name, "DF0") || name_eq(b->name, "PVMK") ||
+		    b->pri == -128)
+			continue;		/* SORIX-ILOM-LDOM's own boot media */
 		if (!best || b->pri > best->pri)
 			best = b;
 	}
@@ -1166,6 +1272,8 @@ boot_target(const char *what, int pv, int force)
 		n++;
 	}
 	dev[n] = 0;
+	if (streq(dev, "ser") && what[n] == ':')
+		goto amix;			/* a kernel sent over serial */
 	if (!(p = part_find(dev))) {
 		kprintf("boot: no partition %s (see part)\n", dev);
 		return -1;
@@ -1204,6 +1312,7 @@ boot_target(const char *what, int pv, int force)
 		kprintf("boot: %s: no loader for this partition type\n", p->name);
 		return -1;
 	}
+amix:
 	if (pv && !cpuinfo.mmu_ok) {
 		kprintf("boot: -pv needs a working MMU (MMU self-test %s)\n",
 		    mmu_result());
@@ -1232,8 +1341,13 @@ cmd_boot(int argc, char **argv)
 {
 	int pv = 0, force = 0, i;
 
+	amix_mem_cap = 0;
 	for (i = 1; i < argc && argv[i][0] == '-'; i++) {
-		if (streq(argv[i], "-pv"))
+		if (streq(argv[i], "-m") && i + 1 < argc) {
+			if (!need_num(argv[++i], &amix_mem_cap, "megabytes"))
+				return;
+			amix_mem_cap <<= 20;
+		} else if (streq(argv[i], "-pv"))
 			pv = 1;
 		else if (streq(argv[i], "-native"))
 			pv = 0;
@@ -1389,6 +1503,99 @@ cmd_reset(int argc, char **argv)
 	cold_reboot();
 }
 
+/* ------------------------------------------------------------------ */
+/* update: a new boot volume (pvmk.adf) onto the PVMK partition        */
+
+#define ADF_BLOCKS	1760
+
+static u32
+bb_checksum(const u8 *bb)		/* boot block: sum with carry, inverted */
+{
+	u32 sum = 0, i, v;
+
+	for (i = 0; i < 1024; i += 4) {
+		v = i == 4 ? 0 : PEEK32(bb, i);
+		if (sum + v < sum)
+			sum++;
+		sum += v;
+	}
+	return ~sum;
+}
+
+/*
+ * update ser:<bytes> [partition]: receive a boot volume as built for the
+ * floppy (pvmk.adf, 1760 blocks) over serial, check it, point its boot
+ * block at the partition (default PVMK: the image's absolute first block,
+ * medium hard disk, checksum), write it and read it back. A reset then
+ * boots it.
+ */
+static void
+cmd_update(int argc, char **argv)
+{
+	const char *name = argc > 2 ? argv[2] : "PVMK";
+	u32 size, buf, back, start, isize, i;
+	struct partition *p;
+	u8 *pv;
+
+	if (argc < 2 || argv[1][0] != 's' || argv[1][1] != 'e' ||
+	    argv[1][2] != 'r' || argv[1][3] != ':') {
+		kprintf("usage: update ser:<bytes> [partition]   (pvmk.adf, "
+		    "default partition PVMK)\n");
+		return;
+	}
+	if (!need_num(argv[1] + 4, &size, "size"))
+		return;
+	if (guest.active) {
+		kprintf("update: a guest is active; shut it down or kill it "
+		    "first\n");
+		return;
+	}
+	if (!(p = part_find(name)) || !p->native) {
+		kprintf("update: no partition %s with a native driver (see "
+		    "part)\n", name);
+		return;
+	}
+	if (size != ADF_BLOCKS * 512 || p->nblocks < ADF_BLOCKS) {
+		kprintf("update: need a %u byte boot volume and a partition of "
+		    "at least %u blocks (%s has %u)\n", ADF_BLOCKS * 512,
+		    ADF_BLOCKS, p->name, p->nblocks);
+		return;
+	}
+	buf = (bootcap.hole_base - size - 0x10000) & ~0xffffu;
+	back = (buf - size - 0x10000) & ~0xffffu;
+	if (ser_receive((u8 *)(uintptr_t)buf, size))
+		return;
+	pv = (u8 *)(uintptr_t)buf + PVBB_OFFSET;
+	start = PEEK32(pv, PVBB_O_START);
+	isize = PEEK32(pv, PVBB_O_SIZE);
+	kprintf("update: crc32 %08x\n", crc32((u8 *)(uintptr_t)buf, size));
+	if (PEEK32(buf, 0) != 0x444f5301 || PEEK32(pv, PVBB_O_MAGIC) !=
+	    PVBB_MAGIC || start != 2 || isize > size - 1024 ||
+	    crc32((u8 *)(uintptr_t)buf + 1024, isize) != PEEK32(pv, PVBB_O_CRC)) {
+		kprintf("update: not a SORIX-ILOM-LDOM boot volume (or its image "
+		    "CRC is wrong); nothing written\n");
+		return;
+	}
+	PEEK32(pv, PVBB_O_START) = p->start + 2;	/* absolute on the disk */
+	PEEK16(pv, PVBB_O_MEDIUM) = BOOT_HARDDISK;
+	PEEK32(buf, 4) = bb_checksum((u8 *)(uintptr_t)buf);
+	kprintf("update: writing %u blocks to %s (%s unit %u, blocks %u-%u)\n",
+	    ADF_BLOCKS, p->name, p->device, p->unit, p->start,
+	    p->start + ADF_BLOCKS - 1);
+	if (part_write(p, 0, ADF_BLOCKS, (void *)(uintptr_t)buf) ||
+	    part_read(p, 0, ADF_BLOCKS, (void *)(uintptr_t)back)) {
+		kprintf("update: I/O error\n");
+		return;
+	}
+	for (i = 0; i < size; i++)
+		if (((u8 *)(uintptr_t)buf)[i] != ((u8 *)(uintptr_t)back)[i]) {
+			kprintf("update: VERIFY FAILED at byte %u\n", i);
+			return;
+		}
+	kprintf("update: %s written and verified; reset (without a floppy) "
+	    "boots it\n", p->name);
+}
+
 static const struct cmd cmds[] = {
 	{ "help",  "",                  "this list", cmd_help },
 	{ "ver",   "",                  "version and boot count", cmd_ver },
@@ -1405,8 +1612,8 @@ static const struct cmd cmds[] = {
 	{ "dmesg", "[-p]",              "boot log (-p: previous boot)", cmd_dmesg },
 	{ "sload", "<addr> <len>",      "receive raw bytes over serial", cmd_sload },
 	{ "go",    "<addr>",            "call code at addr, print D0", cmd_go },
-	{ "load",  "dev:[path]",        "load and relocate an AMIX kernel", cmd_load },
-	{ "boot",  "[-pv] [-f] <dev[:path]>", "AmigaOS partition, or AMIX kernel (-pv: deprivileged, -f: any CPU)", cmd_boot },
+	{ "load",  "dev:[path]|ser:<n>", "load and relocate an AMIX kernel (ser: n bytes over serial)", cmd_load },
+	{ "boot",  "[-pv] [-f] [-m MB] <dev[:path]>", "AmigaOS partition, or AMIX kernel (-pv: deprivileged, -f: any CPU, -m: AMIX memory)", cmd_boot },
 	{ "nextboot", "[-pv] <target>|-c", "boot target once, at the next boot menu", cmd_nextboot },
 	{ "menu",  "",                  "the boot menu", cmd_menu },
 	{ "pvtest", "[loop] [stop]",    "run the virtual CPU test guest", cmd_pvtest },
@@ -1419,6 +1626,7 @@ static const struct cmd cmds[] = {
 	{ "watch", "[addr]",            "log guest writes to addr (shadow MMU)", cmd_watch },
 	{ "pt",    "<addr> [u]",        "guest page table walk (u: user view)", cmd_pt },
 	{ "reset", "",                  "reboot into Kickstart", cmd_reset },
+	{ "update", "ser:<n> [part]",   "write a boot volume (pvmk.adf) sent over serial to PVMK", cmd_update },
 	{ NULL, NULL, NULL, NULL },
 };
 

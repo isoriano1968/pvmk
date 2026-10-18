@@ -40,6 +40,84 @@ fpu_restore:
 	.short	0xf350			/* frestore (%a0) */
 	rts
 
+/*
+ * void cache_op(u32 sel, u32 pa): a guest's CINV/CPUSH, as the guest wrote
+ * it, on (A0) = pa; sel = opcode bits 7-3 (cache, push, scope). 040/060.
+ * Entries are 4 bytes: the instruction, then RTS.
+ */
+	.globl	cache_op
+cache_op:
+	move.l	4(%sp),%d0
+	move.l	8(%sp),%a0
+	and.w	#31,%d0
+	lsl.w	#2,%d0
+	jmp	1f(%pc,%d0.w)
+1:
+	nop				/* 00: no cache or scope */
+	rts
+	nop				/* 01: no cache or scope */
+	rts
+	nop				/* 02: no cache or scope */
+	rts
+	nop				/* 03: no cache or scope */
+	rts
+	nop				/* 04: no cache or scope */
+	rts
+	nop				/* 05: no cache or scope */
+	rts
+	nop				/* 06: no cache or scope */
+	rts
+	nop				/* 07: no cache or scope */
+	rts
+	nop				/* 08: no cache or scope */
+	rts
+	.short	0xf448
+	rts
+	.short	0xf450
+	rts
+	.short	0xf458
+	rts
+	nop				/* 0c: no cache or scope */
+	rts
+	.short	0xf468
+	rts
+	.short	0xf470
+	rts
+	.short	0xf478
+	rts
+	nop				/* 10: no cache or scope */
+	rts
+	.short	0xf488
+	rts
+	.short	0xf490
+	rts
+	.short	0xf498
+	rts
+	nop				/* 14: no cache or scope */
+	rts
+	.short	0xf4a8
+	rts
+	.short	0xf4b0
+	rts
+	.short	0xf4b8
+	rts
+	nop				/* 18: no cache or scope */
+	rts
+	.short	0xf4c8
+	rts
+	.short	0xf4d0
+	rts
+	.short	0xf4d8
+	rts
+	nop				/* 1c: no cache or scope */
+	rts
+	.short	0xf4e8
+	rts
+	.short	0xf4f0
+	rts
+	.short	0xf4f8
+	rts
+
 /* void cache_push_all(u32 model): write back and invalidate all caches */
 	.globl	cache_push_all
 cache_push_all:
