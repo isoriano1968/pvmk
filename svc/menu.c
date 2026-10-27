@@ -89,8 +89,8 @@ build(void)
 	char t[40];
 	u32 i, n;
 
-	if (amix_pv < 0)
-		amix_pv = cpuinfo.mmu_ok;
+	if (amix_pv < 0)	/* mode= in pvmk.conf, native by default */
+		amix_pv = bootcap.conf.pv && cpuinfo.mmu_ok;
 	nents = 0;
 	for (i = 0; i < c->nentries; i++)
 		add(c->entry[i].label, c->entry[i].target, c->entry[i].mode);

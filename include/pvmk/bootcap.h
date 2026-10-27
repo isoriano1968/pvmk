@@ -37,7 +37,7 @@ struct conf_entry {
 	char target[40];		/* dev[:path] */
 	u8 mode;			/* ENTRY_* */
 };
-#define ENTRY_AUTO	0		/* deprivileged if the MMU allows */
+#define ENTRY_AUTO	0		/* conf.pv (mode=), if the MMU allows */
 #define ENTRY_PV	1
 #define ENTRY_NATIVE	2
 
@@ -51,6 +51,8 @@ struct conf {
 	u32 keymap;			/* KBD_US, KBD_DE */
 	u32 menu;			/* boot menu at startup */
 	u32 fallback;			/* seconds: a quicker reboot falls back */
+	u32 pv;				/* mode=: ENTRY_AUTO and chooser boots
+					   deprivileged (1) or native (0) */
 	u32 nentries;
 	struct conf_entry entry[CONF_MAXENT];
 };

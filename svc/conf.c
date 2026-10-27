@@ -16,6 +16,8 @@ conf_defaults(struct conf *c)
 	c->display = 1;
 	c->menu = 1;
 	c->fallback = 60;
+	c->pv = 0;		/* native: a deprivileged boot of a 128 MB
+				   060 spends minutes in AMIX's memory check */
 }
 
 static int
@@ -107,6 +109,13 @@ conf_line(struct conf *c, const char *k, u32 klen, const char *v, u32 vlen,
 		if (!parse_u32(v, vlen, &n) || n > 3600)
 			goto bad;
 		c->fallback = n;
+	} else if (streq("mode", k, klen)) {
+		if (streq("native", v, vlen))
+			c->pv = 0;
+		else if (streq("pv", v, vlen))
+			c->pv = 1;
+		else
+			goto bad;
 	} else if (streq("entry", k, klen)) {
 		/* entry=label,dev:path[,pv|native] */
 		struct conf_entry *e;
@@ -185,7 +194,8 @@ conf_show(const struct conf *c)
 	    c->display ? "on" : "off", c->keymap == KBD_DE ? "de" :
 	    c->keymap == KBD_DE_PC ? "de-pc" : "us", c->def,
 	    c->timeout, c->loglevel);
-	kprintf("menu=%s\nfallback=%u\n", c->menu ? "on" : "off", c->fallback);
+	kprintf("menu=%s\nfallback=%u\nmode=%s\n", c->menu ? "on" : "off",
+	    c->fallback, c->pv ? "pv" : "native");
 	for (u32 i = 0; i < c->nentries; i++)
 		kprintf("entry=%s,%s%s\n", c->entry[i].label, c->entry[i].target,
 		    c->entry[i].mode == ENTRY_PV ? ",pv" :
