@@ -128,6 +128,20 @@ $(B)/test.hdf: $(B)/test-dh0.img $(B)/test-work.img $(B)/host/mkhdf
 $(B)/pvmk.hdf: $(B)/pvmk.adf $(B)/host/mkhdf
 	$(B)/host/mkhdf -o $@ -p PVMK,image=$(B)/pvmk.adf,pri=4,bootblocks=2,pvbb
 
+# make test boots from its own volume: conf/pvmk.conf without a default
+# entry, so the menu waits for a choice ("Select: ") instead of counting down.
+$(B)/test/pvmk.conf: conf/pvmk.conf
+	@mkdir -p $(@D)
+	sed 's/^default=.*/default=/' $< > $@
+	@grep -qx 'default=' $@ || { echo "$@: no default= line"; exit 1; }
+
+$(B)/test/pvmk.adf: $(B)/bootblock.bin $(B)/pvmk.bin $(B)/host/mkadf $(B)/test/pvmk.conf conf/README.disk
+	$(B)/host/mkadf -q -o $@ -b $(B)/bootblock.bin -i $(B)/pvmk.bin -n PVMK \
+		-f pvmk.conf=$(B)/test/pvmk.conf -f README=conf/README.disk
+
+$(B)/test/pvmk.hdf: $(B)/test/pvmk.adf $(B)/host/mkhdf
+	$(B)/host/mkhdf -o $@ -p PVMK,image=$(B)/test/pvmk.adf,pri=4,bootblocks=2,pvbb
+
 hdf: $(B)/test.hdf
 
 verify: $(B)/pvmk.adf
@@ -168,15 +182,16 @@ run-amix: $(B)/pvmk.adf $(B)/amix-test.hdf
 	$(PYTHON) -I host/uae.py run --cpu $(UAE_CPU) --adf $(B)/pvmk.adf \
 		--amix-hdf $(B)/amix-test.hdf --amix-rw
 
-test: $(B)/pvmk.adf $(B)/test.hdf $(B)/pvmk.hdf
-	$(PYTHON) -I host/uae.py test --cpu $(UAE_CPUS) --adf $(B)/pvmk.adf \
+test: $(B)/test/pvmk.adf $(B)/test.hdf $(B)/test/pvmk.hdf
+	$(PYTHON) -I host/uae.py test --cpu $(UAE_CPUS) --adf $(B)/test/pvmk.adf \
 		--hdf $(B)/test.hdf $(AMIX_OPT)
-	$(PYTHON) -I host/uae.py test-hd --cpu 030 --pvmk-hdf $(B)/pvmk.hdf \
+	$(PYTHON) -I host/uae.py test-hd --cpu 030 --pvmk-hdf $(B)/test/pvmk.hdf \
+		--conf $(B)/test/pvmk.conf \
 		--hdf $(B)/test.hdf
-	$(PYTHON) -I host/uae.py test --cpu 030 --adf $(B)/pvmk.adf \
+	$(PYTHON) -I host/uae.py test --cpu 030 --adf $(B)/test/pvmk.adf \
 		--hdf $(B)/test.hdf --hdf-ctrl uae
 	$(if $(GDB),$(PYTHON) -I host/uae.py test-gdb --cpu $(UAE_CPUS) \
-		--adf $(B)/pvmk.adf --gdb $(GDB),@echo "test-gdb: skipped (no gdb-multiarch; GDB=...)")
+		--adf $(B)/test/pvmk.adf --gdb $(GDB),@echo "test-gdb: skipped (no gdb-multiarch; GDB=...)")
 
 toolchain:
 	host/get-toolchain.sh $(TOOLCHAIN_DIR)

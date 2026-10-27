@@ -7,7 +7,7 @@
       M1 acceptance test: boot to the shell, exercise commands, warm reset,
       check the previous-boot log; with --hdf also SCSI, partitions, ls and
       the AmigaOS boot request. Exit status 0 if all CPUs pass.
-  uae.py test-hd --pvmk-hdf FILE --adf FILE --hdf FILE [--cpu 030]
+  uae.py test-hd --pvmk-hdf FILE --adf FILE --hdf FILE [--conf FILE] [--cpu 030]
       M11 test: boot SORIX-ILOM-LDOM from its PVMK partition (no floppy),
       "update" a new boot volume over serial, reset into it, and decline
       for "boot dh0" (works on a copy of the PVMK disk).
@@ -430,13 +430,13 @@ def cmd_test_gdb(args):
     return 0 if ok else 1
 
 
-def hd_one(cpu, adf, hdf, pvmk_hdf):
+def hd_one(cpu, adf, hdf, pvmk_hdf, conf_path="conf/pvmk.conf"):
     """M11: PVMK partition boot, update over serial, decline to DH0."""
     import shutil
     disk = f"build/pvmk-test-{cpu}.hdf"
     shutil.copyfile(pvmk_hdf, disk)
     # the new volume: the same image, a pvmk.conf with timeout=7 as a marker
-    conf = open("conf/pvmk.conf").read().replace("timeout=30", "timeout=7")
+    conf = open(conf_path).read().replace("timeout=30", "timeout=7")
     assert "timeout=7" in conf
     open("build/pvmk-test.conf", "w").write(conf)
     subprocess.run(["build/host/mkadf", "-o", "build/pvmk-test.adf", "-b",
@@ -483,7 +483,7 @@ def hd_one(cpu, adf, hdf, pvmk_hdf):
 
 
 def cmd_test_hd(args):
-    ok = all([hd_one(cpu, args.adf, args.hdf, args.pvmk_hdf)
+    ok = all([hd_one(cpu, args.adf, args.hdf, args.pvmk_hdf, args.conf)
               for cpu in args.cpu])
     return 0 if ok else 1
 
@@ -521,6 +521,8 @@ def main():
     h.add_argument("--adf", default="build/pvmk.adf")
     h.add_argument("--hdf", default="build/test.hdf")
     h.add_argument("--pvmk-hdf", default="build/pvmk.hdf")
+    h.add_argument("--conf", default="conf/pvmk.conf",
+                   help="pvmk.conf of the PVMK volume (the update test rewrites it)")
     g = sub.add_parser("test-gdb")
     g.add_argument("--cpu", nargs="+", choices=CPU_OPTS,
                    default=["030", "040", "060"])
