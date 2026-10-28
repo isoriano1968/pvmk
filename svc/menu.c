@@ -208,6 +208,9 @@ struct kern {
 static struct kern kerns[MAXKERN];
 static u32 nkerns;
 
+/* chooser keys: no 'b' (back) and no 'p' (type a path) */
+static const char kern_keys[MAXKERN + 1] = "123456789acdefgh";
+
 static void
 kern_add(void *arg, const char *path, u32 size)
 {
@@ -257,8 +260,8 @@ choose_kernel(void)
 			amix_kernels(parts[i].name, kern_add, NULL);
 	kprintf("\n Kernels in /stand on the AMIX roots:\n\n");
 	for (i = 0; i < nkerns; i++)
-		kprintf("  %c  %-40s %8u bytes\n", i < 9 ? '1' + (int)i :
-		    'a' + (int)i - 9, kerns[i].path, kerns[i].size);
+		kprintf("  %c  %-40s %8u bytes\n", kern_keys[i],
+		    kerns[i].path, kerns[i].size);
 	if (!nkerns)
 		kprintf("  (none found)\n");
 	kprintf("  p  type a path (dev:path)\n  b  back\n\nKernel: ");
@@ -278,8 +281,8 @@ choose_kernel(void)
 			boot_entry(&e);
 			return;
 		}
-		i = c >= '1' && c <= '9' ? (u32)(c - '1') :
-		    c >= 'a' && c <= 'g' ? (u32)(c - 'a' + 9) : MAXKERN;
+		for (i = 0; i < nkerns && kern_keys[i] != c; i++)
+			;
 		if (i < nkerns) {
 			kprintf("%c\n", c);
 			copy(e.target, sizeof(e.target), kerns[i].path);
