@@ -1622,7 +1622,7 @@ static const struct cmd cmds[] = {
 	{ "resume", "",                 "continue the stopped guest", cmd_resume },
 	{ "shutdown", "",               "shut the guest down cleanly (AMIX)", cmd_shutdown },
 	{ "kill",  "",                  "discard the guest (hard stop)", cmd_kill },
-	{ "kick",  "",                  "AmigaOS from the Kickstart ROM, deprivileged (M8, experimental)", cmd_kick },
+	{ "kick",  "",                  "AmigaOS from the Kickstart ROM, deprivileged (experimental)", cmd_kick },
 	{ "watch", "[addr]",            "log guest writes to addr (shadow MMU)", cmd_watch },
 	{ "pt",    "<addr> [u]",        "guest page table walk (u: user view)", cmd_pt },
 	{ "reset", "",                  "reboot into Kickstart", cmd_reset },

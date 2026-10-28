@@ -742,13 +742,13 @@ Status (2026-10-27), summary:
 | M2 | Done; AMIX's 040/060 kernel (`UNIX_Root:/stand/unix.z3`) boots natively through SORIX-ILOM-LDOM every day on the real A3000 |
 | M3 | Done in FS-UAE (030/040/060); real-hardware confirmation open |
 | M4 | AMIX deprivileged to multi-user on the 030 in FS-UAE; the test on the A3000's onboard 68030 is open |
-| M5 | Done; in daily use on the real A3000. `mode=native\|pv` (default native) since 3899214 |
+| M5 | Done; in daily use on the real A3000. `mode=native\|pv` (default native) since 9079c01 |
 | M6 | Parts 1 and 2 done (boot to login 148 -> 92 s in FS-UAE). Open: assembly fill path, MOVES/MOVEC/MOVE USP in AMIX's trap entry and exit, measurements on real hardware |
 | M7 | 040/060 shadow MMU; `boot -pv` of the 040/060 kernel reaches login on the 040 and 060 in FS-UAE. On the real Z3660 a deprivileged boot with 128 MB spends minutes in AMIX's memory check, hence native by default |
 | M8 | Kickstart 3.2 to CLI deprivileged on 030/040/060 in FS-UAE. Open: Workbench and applications |
 | M9 | Not started (stretch) |
 | M10 | Parked, to be decided |
-| M11 | Done (faaa9b4); the real A3000 boots from its PVMK partition, `update ser:` replaces the volume |
+| M11 | Done (f55bd31); the real A3000 boots from its PVMK partition, `update ser:` replaces the volume |
 | A1-A4 | Done natively on the real A3000: the amix-040-060-port kernel with the Z3660 disk, network and RTG drivers (X11, Motif, CDE), plus the native Paula driver `/dev/paula` |
 
 The gap: nothing deprivileged (M3, M4, M7) has run on real hardware yet.

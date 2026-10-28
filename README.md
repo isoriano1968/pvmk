@@ -107,82 +107,61 @@ The boot log survives a warm reset: `dmesg -p` shows the previous boot.
 
 ## Status
 
-- M0 (toolchain, boot floppy, serial output): done.
-- M1 boot monitor, floppy part: done and tested in FS-UAE on 68030, 68040
-  and 68060. Not yet tried on real hardware.
-- Disks and partitions: stage0 reads the RDB of every disk through
-  Kickstart's own drivers (whatever controller Kickstart boots from:
-  A3000 SCSI, accelerator or Zorro controllers, emulated HDFs), so `part`
-  and `boot` work for all of them. After takeover, a native driver for the
-  A3000 internal SCSI (WD33C93A/SDMAC, polled, DMA through a chip RAM
-  bounce buffer) also gives `ls`. Tested in FS-UAE on the internal SCSI and
-  on UAE's own controller (`make test`, `build/test.hdf` from
-  `host/mkhdf`).
-- Native Z3660 disk driver (piscsi mailbox), next to the A3000 SCSI driver:
-  written, not yet tested on real hardware.
-- M2 (in progress): read-only UFS reader; AMIX kernel loaded from its UFS
-  root (`boot unix_root:` = `/stand/unix`, any path accepted), relocated and
-  started natively the way AMIX's own boot2/copyit do. AMIX 2.1 boots to
-  multi-user login in FS-UAE (68030) from a real AMIX disk. Not yet: loading
-  through Kickstart's drivers for disks without a native driver, tests on
-  the real A3000.
-- M3 (in progress): virtual CPU. A guest runs in user mode while
-  SORIX-ILOM-LDOM keeps supervisor mode, its vectors and the MMU: privileged
-  instructions (SR access, MOVE USP, MOVEC, RTE, STOP, RESET, MOVES,
-  PMOVE/PFLUSH/PTEST, CINV/CPUSH, FSAVE/FRESTORE) are emulated, exceptions
-  and interrupts are reflected through the guest's own VBR, TRAP #15 is a
-  hypercall. Ctrl-C stops a running guest and opens the shell; `resume`
-  continues it. The pvtest guest passes on 68030, 68040 and 68060 in
-  FS-UAE. A boot-time MMU self-test (translation, write, fault; 68030 PMMU
-  and 68040/68060 MMU) must pass before a guest starts: CPUs or accelerator
-  modes without a working MMU are refused. STOP (and the idle hypercall)
-  really idles the CPU until an interrupt the guest has not masked, then
-  delivers it. GDB stub: `gdb` in the shell hands the serial port to GDB
-  for the stopped guest (registers, memory, breakpoints, single step,
-  continue, detach; guest console output arrives as GDB output). M3 is
-  complete in FS-UAE; to be confirmed on the real A3000.
+In daily use on an Amiga 3000 with a Z3660 (68060, 128 MB):
 
-Debugging pvtest with GDB in FS-UAE:
+- **Boot manager.** It boots from its own `PVMK` hard disk partition or from
+  the floppy, and shows the boot menu on screen and serial. It then starts the
+  68040/68060 AMIX kernel natively from the AMIX disk, or boots AmigaOS.
+- **The menu:**
+  - kernels from `/stand`;
+  - `entry=` lines in `pvmk.conf`;
+  - `nextboot` to boot a kernel once, with fallback to the default when a
+    test kernel reboots quickly;
+  - a check that the kernel fits the CPU;
+  - a kernel sent over the serial line (`boot ser:`);
+  - `update ser:` to replace its own boot volume.
+- **The shell and the serial boot log**, on the real machine.
 
-```sh
-python3 host/uae.py run --gdb-port 2345    # SORIX-ILOM-LDOM> pvtest stop
-                                           # SORIX-ILOM-LDOM> gdb
-gdb-multiarch build/pvtest.elf -ex 'target remote localhost:2345'
-```
+Working in FS-UAE (68030, 68040 and 68060), not yet confirmed on real
+hardware:
 
-On real hardware: `target remote /dev/ttyUSB0` after `set serial baud 115200`.
-- M4 (in progress): `boot -pv unix_root:` starts AMIX deprivileged on a
-  68030, with a shadow MMU built from AMIX's own page tables and a
-  load-time PV patches (copyin/copyout, halt/reboot). In FS-UAE AMIX boots
-  to multi-user and login, slowly (every spl traps; M6 makes that fast).
-  A reboot goes through SORIX-ILOM-LDOM, which boots the kernel again. Break in
-  with Ctrl + Left Amiga + Help (FS-UAE on a PC: Left Ctrl + Left Windows
-  + End) or Ctrl-C on serial; `resume` gives AMIX its screen back.
-  `shutdown` shuts a stopped AMIX down cleanly (SIGPWR to its init, the
-  powerfail entry of /etc/inittab), `kill` discards a guest at once.
-- M8 (in progress): AmigaOS as a guest. `kick` (or the boot menu's
-  AmigaOS entry in deprivileged mode) runs Kickstart from the ROM under
-  SORIX-ILOM-LDOM; it boots to its CLI from the hard disk in FS-UAE (the boot
-  floppy declines itself under SORIX-ILOM-LDOM, SORIX-ILOM-LDOM's memory is taken
-  out of AmigaOS's free list).
-- M7: shadow MMU for the 68040 and 68060 too. The amigaux.org 040/060
-  AMIX kernel boots deprivileged to the login prompt in FS-UAE on both
-  (`boot -pv unix_root:/stand/unix-040`); next is the Z3660 in its real
-  68060 mode. Shell aids:
-  `guest log` (AMIX kernel messages), `pt` (page table walk), `md -g`,
-  `watch`. Not yet on 68040/68060 (AMIX's 2 KB pages).
-GDB's own m68k breakpoint (TRAP #15) is the hypercall, so breakpoints are
-ILLEGAL instructions the stub tells apart by address.
-- M5: a boot menu at every start (screen and serial): AMIX kernels on the
-  AMIX roots (or `entry=` lines in `pvmk.conf`), deprivileged or native,
-  a chooser for the kernels in `/stand`, the AmigaOS partition, the shell,
-  reboot; `default=` and `timeout=` give the countdown. `nextboot` boots a
-  kernel once (for testing); a non-default kernel that reboots quickly
-  falls back to the default. Kernels that do not fit the CPU (stock 030
-  kernel on a 68040/68060, 040/060 port kernel on a 68030) need a
-  confirmation.
-- Hard disk boot of SORIX-ILOM-LDOM itself (`PVMK` partition, `pvinstall`) is
-  the last milestone (M11); the boot floppy is the boot medium until then.
+- **AMIX deprivileged** (`boot -pv`): AMIX runs in user mode under
+  SORIX-ILOM-LDOM, with a shadow MMU built from its own page tables and
+  load-time paravirtual patches. It reaches multi-user and login.
+  - Break in with Ctrl + Left Amiga + Help, or Ctrl-C on serial; `resume`
+    continues.
+  - `shutdown` and `kill` stop a guest.
+  - On the real Z3660 with 128 MB, AMIX's memory check takes minutes this
+    way, so the boot menu boots natively by default (`mode=native`).
+- **AmigaOS deprivileged** (`kick`): Kickstart 3.2 to its CLI.
+- **The virtual CPU:**
+  - privileged instructions emulated;
+  - exceptions and interrupts reflected through the guest's VBR;
+  - `TRAP #15` hypercalls;
+  - idling on `STOP`;
+  - a boot-time MMU self-test.
+
+  The `pvtest` guest passes on all three CPUs.
+- **GDB:** `gdb` in the shell hands the serial port to GDB for the stopped
+  guest.
+
+  ```sh
+  python3 host/uae.py run --gdb-port 2345    # SORIX-ILOM-LDOM> pvtest stop
+                                             # SORIX-ILOM-LDOM> gdb
+  gdb-multiarch build/pvtest.elf -ex 'target remote localhost:2345'
+  ```
+
+  On real hardware: `target remote /dev/ttyUSB0` after
+  `set serial baud 115200`.
+
+Next on the plan:
+- make the deprivileged boot usable on the real 68060, and measure its cost;
+- performance work (M6);
+- running AMIX and AmigaOS side by side (M9, a stretch goal);
+- an ILOM-like web console over the Z3660's network (M10).
+
+[PLAN.md](PLAN.md) has the architecture, the milestones and the development
+log.
 
 ## Layout
 
@@ -208,3 +187,7 @@ This repository must not contain AMIX sources, headers, libraries or kernel
 objects, nor Kickstart ROM images. Users supply their own licensed copies.
 AMIX-side paravirtualization changes are kept as patches against a user's
 own AMIX tree.
+
+## Licence
+
+MIT (`LICENSE`).

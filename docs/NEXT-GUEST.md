@@ -75,7 +75,7 @@ N1 acceptance: POST completes without double fault or unhandled-instruction stop
 
 ## 13. Answers and corrections from the pvmk code (2026-10-23)
 
-Read from the code as of pvmk faaa9b4 plus the uncommitted work since; nothing built for this.
+Read from the code as of pvmk f55bd31 plus the uncommitted work since; nothing built for this.
 
 ### 13.1 The vCPU's personality is the host CPU's (§4, question 1)
 - `movec()` (core/vcpu.c) shadows SFC, DFC, CACR, USP, VBR, MSP (not on the 060), ISP, TC, ITT0/1, DTT0/1, URP, SRP, and gates the rest **by the host model** (`cpuinfo.model`): on the 060 host MMUSR (0x805) is refused (illegal, as on a real 060) and PCR/BUSCR exist; CACR keeps only the bits the host CPU reads back (060: 0xf880e000), PCR's DFP/ESS go to the real PCR. So today a guest on the Z3660 *is* a 68060. A 68040 personality on a 060 host is new work: a guest CPU model separate from `cpuinfo.model`, used by `movec()` (MMUSR present, PCR/BUSCR illegal, 040 CACR bits DE/IE only), by frame construction and by FSAVE.
