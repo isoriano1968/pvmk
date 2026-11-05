@@ -280,6 +280,7 @@ def test_one(cpu, adf, hdf, ctrl="scsi", amix_hdf=None):
         # no Z3660 in FS-UAE: net says so and returns
         shell("net 10.0.0.2", rb"net: no Z3660 ethernet")
         shell("net 10.0.300.2", rb"usage: net")
+        shell("net -i 10.0.0.2", rb"net: no Z3660 ethernet")
         shell("mw 2000 deadbeef", rb"")
         shell("md 2000 4", rb"00002000: de ad be ef")
         step = "sload"

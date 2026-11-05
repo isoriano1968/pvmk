@@ -31,6 +31,17 @@ int z3660eth_recv(u8 *buf, int max);
 /* send a frame; 0 sent, 1 no link, -1 error */
 int z3660eth_send(const u8 *buf, int len);
 
+/*
+ * Interrupt mode (net -i): the firmware raises INT6 for a received frame;
+ * the handler acknowledges and masks it (CONFIG 0) and sets eth_irq_pending;
+ * the main loop drains the ring and unmasks (z3660eth_irq_rearm), and the
+ * firmware raises it again while frames are left.  As AMIX's driver does.
+ */
+extern volatile u32 eth_irq_n, eth_irq_spurious, eth_irq_pending;
+void z3660eth_irq(int on);		/* INT6 at level 6 on or off (IPL 5 / 7) */
+void z3660eth_irq_rearm(void);
+extern void (*irq6_hook)(void);		/* core/exc.c */
+
 /* svc/net.c: the shell's net command */
 void cmd_net(int argc, char **argv);
 /* svc/shell.c: a key from serial or keyboard, or -1 (does not wait) */

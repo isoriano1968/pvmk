@@ -16,6 +16,10 @@
 #define CUSTOM_INTREQR	0xdff01e
 #define CUSTOM_INTENA	0xdff09a
 #define CUSTOM_INTREQ	0xdff09c
+#define INT_SETCLR	0x8000
+#define INT_INTEN	0x4000
+#define INT_EXTER	0x2000		/* level 6: INT6 of the expansion bus, CIA-B */
+#define CIA_B_ICR	0xbfdd00	/* CIA-B interrupt control (read clears) */
 
 #define SERDATR_TBE	13		/* transmit buffer empty */
 #define SERDATR_TSRE	12		/* transmit shift register empty */

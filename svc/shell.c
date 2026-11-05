@@ -1883,7 +1883,7 @@ static const struct cmd cmds[] = {
 	{ "md",    "[-g] <addr> [len]", "memory dump (-g: guest kernel virtual)", cmd_md },
 	{ "mw",    "[.b|.w|.l] <a> <v>", "memory write (mw.b, mw.w, mw.l)", cmd_mw },
 	{ "memtest", "<addr> <len>",    "RAM test, contents kept (bus error safe)", cmd_memtest },
-	{ "net",   "<a.b.c.d>",         "Z3660 network test: ping, UDP echo/discard/send", cmd_net },
+	{ "net",   "[-i] <a.b.c.d>",    "Z3660 network test: ping, UDP echo/discard/send (-i: INT6)", cmd_net },
 	{ "dr",    "<unit> <lba> <n> <addr>", "Z3660 disk sectors into memory, crc32", cmd_dr },
 	{ "dw",    "<unit> <lba> <n> <addr> <crc>", "write them from memory if crc32 matches, verify", cmd_dw },
 	{ "regs",  "",                  "registers of the last exception", cmd_regs },

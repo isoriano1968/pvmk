@@ -5,6 +5,7 @@
 #include "pvmk/kprintf.h"
 #include "pvmk/log.h"
 #include "pvmk/mk.h"
+#include "pvmk/net.h"
 #include "pvmk/vcpu.h"
 
 static struct excregs last;
@@ -62,12 +63,19 @@ show(const struct excregs *r, u32 ssp, int has_addr, u32 addr)
 		kprintf("    USP %08x\n", r->a[7]);
 }
 
+/* a handler for level 6 interrupts while no guest runs (net -i), or 0 */
+void (*irq6_hook)(void);
+
 void
 exception(struct excregs *r)
 {
 	u32 vec = (r->fmtvec & 0xfff) >> 2, fmt = r->fmtvec >> 12;
 	const u8 *frame = (const u8 *)&r->sr;
 
+	if (vec == 30 && irq6_hook && !guest.running) {
+		irq6_hook();			/* net -i: the Z3660's INT6 */
+		return;
+	}
 	if (idle_active && vec >= 24 && vec <= 31) {
 		/* the interrupt that ends a guest's STOP: keep it pending */
 		idle_vec = vec;

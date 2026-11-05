@@ -14,6 +14,13 @@
  * Every second a line: frames in and out, KB/s each way, UDP 9 datagrams
  * and the ones lost, the firmware serials skipped (frames the board's ring
  * lost before pvmk saw them).  host/nettest.py is the PC's side.
+ *
+ * net -i <a.b.c.d>: the same, driven by the board's INT6 instead of polling
+ * (the test for AMIX's interrupt receive): the ring is drained when the
+ * interrupt says so, and a slow poll (every 100 ms) counts what it finds as
+ * "late" (an interrupt missed).  The line adds the interrupts, the spurious
+ * ones (INT6 not from the board) and frames per interrupt.  More than 5000
+ * spurious ones in a second is a storm: interrupts off, back to polling.
  */
 #include "pvmk/kprintf.h"
 #include "pvmk/log.h"
@@ -295,16 +302,34 @@ frame_in(int n)
 		udp_in(f, ip, ihl, iplen);
 }
 
+/* drain the ring; the frames it held */
+static u32
+drain(void)
+{
+	u32 k = 0;
+	int n;
+
+	while ((n = z3660eth_recv(rxb, ETH_MAXLEN)) > 0) {
+		frame_in(n);
+		k++;
+	}
+	return k;
+}
+
 void
 cmd_net(int argc, char **argv)
 {
 	static const u8 zero[ETH_ALEN];
 	struct eth_stats last;
-	u32 t0, t1, sec = 0, last_u9 = 0;
-	int n;
+	u32 t0, t1, tp, sec = 0, last_u9 = 0, late = 0, irqf = 0, last_irq = 0, last_sp = 0;
+	int irq = argc > 1 && argv[1][0] == '-' && argv[1][1] == 'i';
 
+	if (irq) {
+		argc--;
+		argv++;
+	}
 	if (argc < 2 || !parse_ip(argv[1], &my_ip)) {
-		kprintf("usage: net <a.b.c.d>   (pvmk's address; any key stops)\n");
+		kprintf("usage: net [-i] <a.b.c.d>   (pvmk's address; -i: INT6; any key stops)\n");
 		return;
 	}
 	if (z3660eth_init() < 0) {
@@ -314,33 +339,61 @@ cmd_net(int argc, char **argv)
 	kprintf("net: %02x:%02x:%02x:%02x:%02x:%02x as ", eth_mac[0], eth_mac[1],
 	    eth_mac[2], eth_mac[3], eth_mac[4], eth_mac[5]);
 	print_ip(my_ip);
-	kprintf(": ping it, UDP 7 echo, 9 discard, 5001 control; any key stops\n");
+	kprintf(": ping it, UDP 7 echo, 9 discard, 5001 control; %sany key stops\n",
+	    irq ? "INT6 driven; " : "");
 	eth_stats = (struct eth_stats){ 0 };
 	udp9_n = udp9_lost = 0;
 	udp9_seq = 0;
 	arp_send(1, zero, my_ip);		/* gratuitous: here I am */
 	last = eth_stats;
-	t0 = now_ms();
+	t0 = tp = now_ms();
+	if (irq)
+		z3660eth_irq(1);
 	for (;;) {
-		while ((n = z3660eth_recv(rxb, ETH_MAXLEN)) > 0)
-			frame_in(n);
+		if (!irq)
+			drain();
+		else if (eth_irq_pending) {
+			eth_irq_pending = 0;
+			irqf += drain();
+			z3660eth_irq_rearm();
+		}
 		t1 = now_ms();
+		if (irq && t1 - tp >= 100) {	/* the slow poll: what an interrupt missed */
+			late += drain();
+			tp = t1;
+		}
 		if (t1 - t0 >= 1000) {
-			u32 dt = t1 - t0;
+			u32 dt = t1 - t0, ni = eth_irq_n - last_irq, sp = eth_irq_spurious - last_sp;
 
 			sec++;
-			kprintf("%4us in %5u %4u KB/s  out %5u %4u KB/s  udp9 %u (lost %u)  skipped %u\n",
+			kprintf("%4us in %5u %4u KB/s  out %5u %4u KB/s  udp9 %u (lost %u)  skipped %u",
 			    sec, eth_stats.rx - last.rx,
 			    (eth_stats.rx_bytes - last.rx_bytes) / dt,
 			    eth_stats.tx - last.tx,
 			    (eth_stats.tx_bytes - last.tx_bytes) / dt,
 			    udp9_n - last_u9, udp9_lost, eth_stats.rx_skipped);
+			if (irq)
+				kprintf("  irq %u spurious %u late %u", ni, sp, late);
+			kprintf("\n");
+			if (irq && sp > 5000) {
+				z3660eth_irq(0);
+				irq = 0;
+				kprintf("net: %u spurious INT6 in a second: a storm; interrupts off, polling\n", sp);
+			}
 			last = eth_stats;
 			last_u9 = udp9_n;
+			last_irq = eth_irq_n;
+			last_sp = eth_irq_spurious;
 			t0 = t1;
 		}
 		if (net_getc() >= 0)
 			break;
+	}
+	if (irq) {
+		z3660eth_irq(0);
+		kprintf("net: INT6 %u, spurious %u, frames by interrupt %u (%u.%u a time), late %u\n",
+		    eth_irq_n, eth_irq_spurious, irqf, eth_irq_n ? irqf / eth_irq_n : 0,
+		    eth_irq_n ? irqf * 10 / eth_irq_n % 10 : 0, late);
 	}
 	kprintf("net: in %u frames (%u bad), out %u (%u no link, %u errors), "
 	    "udp9 %u (lost %u), skipped %u\n", eth_stats.rx, eth_stats.rx_bad,

@@ -19,6 +19,7 @@
  *
  * The data cache is off in pvmk: no maintenance around the frames.
  */
+#include "pvmk/amiga.h"
 #include "pvmk/kprintf.h"
 #include "pvmk/net.h"
 #include "pvmk/z3660.h"
@@ -29,6 +30,7 @@
 #define ZZ_ETH_MAC_HI	0x198
 #define ZZ_ETH_MAC_LO	0x19C
 #define ZZ_ETH_RX_ADDR	0x1A4
+#define ZZ_INT_STATUS	0x1A8		/* R: pending, ETH = bit 0 */
 
 #define RX_RING		0x07ED0000
 #define RX_SLOTS	64		/* the firmware's backlog range */
@@ -180,4 +182,53 @@ z3660eth_send(const u8 *buf, int len)
 	else
 		eth_stats.tx_err++;
 	return rc == 0 ? 0 : rc == 1 ? 1 : -1;
+}
+
+/* ---- interrupt mode ---------------------------------------------------- */
+
+volatile u32 eth_irq_n, eth_irq_spurious, eth_irq_pending;
+
+/* level 6: CIA-B and the expansion bus share it; ours when INT_STATUS says
+   ETH.  Acknowledge and mask (CONFIG 0, armed by RX_ADDR), leave the drain
+   to the main loop, clear Paula's EXTER request after the source. */
+static void
+z3660eth_isr(void)
+{
+	u32 st = rd(ZZ_INT_STATUS);
+
+	if (st != 0xffffffff && (st & 1)) {
+		wr_armed(ZZ_ETH_RX_ADDR, ZZ_CONFIG, 0);
+		eth_irq_pending = 1;
+		eth_irq_n++;
+	} else
+		eth_irq_spurious++;
+	(void)*(volatile u8 *)CIA_B_ICR;		/* CIA-B's, if it was that */
+	REG16(CUSTOM_INTREQ) = INT_EXTER;
+}
+
+void
+z3660eth_irq_rearm(void)
+{
+	wr_armed(ZZ_ETH_RX_ADDR, ZZ_CONFIG, 1);
+}
+
+void
+z3660eth_irq(int on)
+{
+	if (on) {
+		*(volatile u8 *)CIA_B_ICR = 0x7f;	/* no CIA-B interrupt */
+		(void)*(volatile u8 *)CIA_B_ICR;
+		eth_irq_n = eth_irq_spurious = eth_irq_pending = 0;
+		irq6_hook = z3660eth_isr;
+		REG16(CUSTOM_INTREQ) = INT_EXTER;
+		REG16(CUSTOM_INTENA) = INT_SETCLR | INT_INTEN | INT_EXTER;
+		z3660eth_irq_rearm();
+		__asm__ __volatile__("move.w #0x2500,%%sr" ::: "memory");
+	} else {
+		__asm__ __volatile__("move.w #0x2700,%%sr" ::: "memory");
+		wr_armed(ZZ_ETH_RX_ADDR, ZZ_CONFIG, 0);
+		REG16(CUSTOM_INTENA) = INT_INTEN | INT_EXTER;	/* off again */
+		REG16(CUSTOM_INTREQ) = INT_EXTER;
+		irq6_hook = 0;
+	}
 }
