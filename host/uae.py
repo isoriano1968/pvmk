@@ -264,7 +264,19 @@ def test_one(cpu, adf, hdf, ctrl="scsi", amix_hdf=None):
         shell("help", rb"sload")
         shell("conf", rb"from DF0:pvmk\.conf[\s\S]*baud=115200")
         shell("ls", rb"pvmk\.conf")
-        shell("mem", rb"boot log")
+        out = shell("mem", rb"boot log")
+        # memtest: 1 MB of fast RAM below the hole passes and is kept as it
+        # was; pvmk's own memory is refused
+        step = "memtest"
+        fast = re.findall(rb"([0-9a-f]{8})-([0-9a-f]{8}) +\d+K fast RAM", out)
+        hole = re.search(rb"hole ([0-9a-f]{8})-", out)
+        if fast and hole:
+            lo = int(fast[0][0], 16)
+            shell("mw %x 12345678" % lo, rb"")
+            shell("memtest %x 100000" % lo, rb"memtest: passed", timeout=120)
+            shell("md %x 4" % lo, rb"%08x: 12 34 56 78" % lo)
+            shell("memtest %s 1000" % hole.group(1).decode(), rb"pvmk's own memory")
+        shell("memtest 2000 0", rb"memtest: bad range")
         shell("mw 2000 deadbeef", rb"")
         shell("md 2000 4", rb"00002000: de ad be ef")
         step = "sload"

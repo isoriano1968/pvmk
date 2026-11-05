@@ -79,6 +79,8 @@ SORIX-ILOM-LDOM> help
                                  (partitions on the A3000 internal SCSI)
   md <addr> [len]                memory dump
   mw[.b|.w|.l] <addr> <value>    memory write
+  memtest <addr> <len>           RAM test that keeps the contents: a bus
+                                 error is "no RAM", mirrors are found
   sload <addr> <len>             receive raw bytes over serial
   go <addr>                      call code, print D0
   regs                           registers of the last exception

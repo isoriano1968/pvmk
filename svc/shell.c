@@ -1596,6 +1596,187 @@ cmd_update(int argc, char **argv)
 	    "boots it\n", p->name);
 }
 
+/*
+ * memtest <addr> <len>: a RAM test that leaves the contents as they were,
+ * for memory a kernel is about to be given (a new range of the Z3660, say)
+ * before AMIX runs on it.  The data cache is off here (takeover), so it
+ * tests the RAM.  First three probes that survive a bus error: no RAM, a
+ * clean message.  Then block by block (saved, tested, restored): walking
+ * ones and zeros, 0x55/0xaa, each long word's own address and its inverse.
+ * Last, the address lines above the block: no address of the range may be
+ * a mirror of another one in it, or of RAM elsewhere (addr ^ bit in the
+ * memory list), as with an address decoder that ignores a line (the Z3660's
+ * 0x10000000 range showing 0x08000000).  Any key stops it.
+ */
+#define MT_BLOCK 4096			/* long words a block: 16 KB */
+
+static u32 mt_save[MT_BLOCK];
+static u32 mt_errors;
+
+static int
+mt_fail(u32 a, u32 want, u32 got)
+{
+	if (mt_errors++ < 16)
+		kprintf("\n  %08x: wrote %08x, read %08x (bits %08x)", a, want, got,
+		    want ^ got);
+	return mt_errors >= 16;
+}
+
+/* a pattern over the block: 0 fill v, 1 the address, 2 its inverse */
+static int
+mt_pattern(volatile u32 *p, u32 n, int kind, u32 v)
+{
+	u32 i, w;
+
+	for (i = 0; i < n; i++)
+		p[i] = kind == 0 ? v : kind == 1 ? (u32)(uintptr_t)&p[i] :
+		    ~(u32)(uintptr_t)&p[i];
+	for (i = 0; i < n; i++) {
+		w = kind == 0 ? v : kind == 1 ? (u32)(uintptr_t)&p[i] :
+		    ~(u32)(uintptr_t)&p[i];
+		if (p[i] != w && mt_fail((u32)(uintptr_t)&p[i], w, p[i]))
+			return -1;
+	}
+	return 0;
+}
+
+static int
+mt_block(volatile u32 *p, u32 n)
+{
+	u32 i, b;
+
+	for (i = 0; i < n; i++)
+		mt_save[i] = p[i];
+	for (b = 0; b < 32 && !mt_errors; b++)
+		if (mt_pattern(p, n, 0, 1u << b) || mt_pattern(p, n, 0, ~(1u << b)))
+			break;
+	if (!mt_errors)
+		mt_pattern(p, n, 0, 0x55555555);
+	if (!mt_errors)
+		mt_pattern(p, n, 0, 0xaaaaaaaa);
+	if (!mt_errors)
+		mt_pattern(p, n, 1, 0);
+	if (!mt_errors)
+		mt_pattern(p, n, 2, 0);
+	for (i = 0; i < n; i++)
+		p[i] = mt_save[i];
+	return mt_errors ? -1 : 0;
+}
+
+/* is [a, a+4) RAM of the memory list, or of the range under test, and
+   outside the hole? */
+static int
+mt_is_ram(u32 a, u32 lo, u32 hi)
+{
+	u32 i;
+
+	if (a >= bootcap.hole_base && a < bootcap.hole_top)
+		return 0;
+	if (a >= lo && a < hi)
+		return 1;
+	for (i = 0; i < bootcap.nmem; i++)
+		if (!(bootcap.mem[i].attr & MEMF_CHIP) && a >= bootcap.mem[i].lower &&
+		    a + 4 <= bootcap.mem[i].upper)
+			return 1;
+	return 0;
+}
+
+/* the address lines above the block size (the address pattern covers the
+   ones below): for each bit, at each end of the range, the partner that
+   differs in it, if that is RAM, must keep its own marker */
+static u32 mt_pairs, mt_mirrors;
+
+/* a, then q: q must keep its marker, unless q is not RAM */
+static void
+mt_pair(u32 a, u32 q, u32 lo, u32 hi, const char *why, u32 tag)
+{
+	u32 sa, sq;
+
+	if (q == a || !mt_is_ram(q, lo, hi))
+		return;
+	sa = *(volatile u32 *)(uintptr_t)a;
+	sq = *(volatile u32 *)(uintptr_t)q;
+	*(volatile u32 *)(uintptr_t)q = 0x5a5a0000 | tag;
+	*(volatile u32 *)(uintptr_t)a = 0xa5a50000 | tag;
+	mt_pairs++;
+	if (*(volatile u32 *)(uintptr_t)q != (0x5a5a0000 | tag) && mt_mirrors++ < 8)
+		kprintf("\n  %08x mirrors %08x (%s %u)", a, q, why, tag);
+	*(volatile u32 *)(uintptr_t)q = sq;
+	*(volatile u32 *)(uintptr_t)a = sa;
+}
+
+static int
+mt_lines(u32 lo, u32 hi)
+{
+	u32 b, k, a, len = hi - lo;
+
+	mt_pairs = mt_mirrors = 0;
+	for (k = 0; k < 3; k++) {
+		a = k == 0 ? lo : k == 1 ? hi - 4 : lo + (len / 2 & ~3u);
+		for (b = 14; b < 32; b++)
+			mt_pair(a, a ^ (1u << b), lo, hi, "address bit", b);
+		/* the neighbouring ranges of the same size: a new range that
+		   shows an old one, as 0x10000000 the RAM at 0x08000000 */
+		mt_pair(a, a - len, lo, hi, "one range below, k", k);
+		mt_pair(a, a + len, lo, hi, "one range above, k", k);
+	}
+	kprintf("\n  address lines: %u pairs, %u mirrors", mt_pairs, mt_mirrors);
+	return mt_mirrors ? -1 : 0;
+}
+
+static void
+cmd_memtest(int argc, char **argv)
+{
+	u32 lo, len, hi, a, n, probe[3], v, i, mb = 0;
+
+	if (argc < 3 || !need_num(argv[1], &lo, "address") ||
+	    !need_num(argv[2], &len, "length"))
+		return;
+	lo &= ~3u;
+	len &= ~3u;
+	hi = lo + len;
+	if (!len || hi < lo) {
+		kprintf("memtest: bad range\n");
+		return;
+	}
+	if (lo < bootcap.hole_top && hi > bootcap.hole_base) {
+		kprintf("memtest: %08x-%08x is pvmk's own memory (see mem)\n",
+		    bootcap.hole_base, bootcap.hole_top - 1);
+		return;
+	}
+	probe[0] = lo;
+	probe[1] = lo + (len / 2 & ~3u);
+	probe[2] = hi - 4;
+	for (i = 0; i < 3; i++)
+		if (safe_copy(&v, (const void *)(uintptr_t)probe[i], 4) ||
+		    safe_copy((void *)(uintptr_t)probe[i], &v, 4)) {
+			kprintf("memtest: bus error at %08x: no RAM there\n",
+			    probe[i]);
+			return;
+		}
+	kprintf("memtest %08x-%08x (%u MB), any key stops\n", lo, hi - 1,
+	    len >> 20);
+	mt_errors = 0;
+	for (a = lo; a < hi; a += n * 4) {
+		n = (hi - a) / 4 < MT_BLOCK ? (hi - a) / 4 : MT_BLOCK;
+		if (mt_block((volatile u32 *)(uintptr_t)a, n))
+			break;
+		if (((a + n * 4 - lo) >> 20) != mb) {
+			mb = (a + n * 4 - lo) >> 20;
+			if (!(mb & 7))
+				kprintf("\r  %u MB", mb);
+		}
+		if (getc_any(0) >= 0) {
+			kprintf("\nmemtest: stopped at %08x\n", a + n * 4);
+			return;
+		}
+	}
+	if (!mt_errors && mt_lines(lo, hi))
+		mt_errors++;
+	kprintf("\nmemtest: %s\n", mt_errors ? "ERRORS (contents restored)" :
+	    "passed");
+}
+
 static const struct cmd cmds[] = {
 	{ "help",  "",                  "this list", cmd_help },
 	{ "ver",   "",                  "version and boot count", cmd_ver },
@@ -1608,6 +1789,7 @@ static const struct cmd cmds[] = {
 	{ "part",  "",                  "list partitions", cmd_part },
 	{ "md",    "[-g] <addr> [len]", "memory dump (-g: guest kernel virtual)", cmd_md },
 	{ "mw",    "[.b|.w|.l] <a> <v>", "memory write (mw.b, mw.w, mw.l)", cmd_mw },
+	{ "memtest", "<addr> <len>",    "RAM test, contents kept (bus error safe)", cmd_memtest },
 	{ "regs",  "",                  "registers of the last exception", cmd_regs },
 	{ "dmesg", "[-p]",              "boot log (-p: previous boot)", cmd_dmesg },
 	{ "sload", "<addr> <len>",      "receive raw bytes over serial", cmd_sload },
