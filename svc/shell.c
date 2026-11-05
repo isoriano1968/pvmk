@@ -1803,6 +1803,73 @@ cmd_memtest(int argc, char **argv)
 	    "passed");
 }
 
+/*
+ * dr <unit> <lba> <count> <addr>: Z3660 disk sectors into memory, and their
+ * crc32.  dw <unit> <lba> <count> <addr> <crc32>: write them back from
+ * memory, only if the memory holds what crc32 says (the bytes meant, sent
+ * with sload), then read them back and compare.  For repairs in place, as
+ * the root superblock after the 2026-11-05 crash: check with dr that the
+ * disk holds what is expected, then dw.
+ */
+static void
+cmd_dr(int argc, char **argv)
+{
+	u32 unit, lba, n, addr;
+
+	if (argc < 5 || !need_num(argv[1], &unit, "unit") || !need_num(argv[2], &lba, "lba") ||
+	    !need_num(argv[3], &n, "count") || !need_num(argv[4], &addr, "address"))
+		return;
+	if (z3660_init() < 0 || !n || n > 2048) {
+		kprintf("dr: no Z3660, or count not 1-2048\n");
+		return;
+	}
+	if (z3660_read(unit, lba, n, (void *)(uintptr_t)addr)) {
+		kprintf("dr: read error\n");
+		return;
+	}
+	kprintf("dr: unit %u lba %u count %u at %08x, crc32 %08x\n", unit, lba, n, addr,
+	    crc32((u8 *)(uintptr_t)addr, n * 512));
+}
+
+static void
+cmd_dw(int argc, char **argv)
+{
+	u32 unit, lba, n, addr, want, back, i;
+	const u8 *p;
+	u8 *q;
+
+	if (argc < 6 || !need_num(argv[1], &unit, "unit") || !need_num(argv[2], &lba, "lba") ||
+	    !need_num(argv[3], &n, "count") || !need_num(argv[4], &addr, "address") ||
+	    !need_num(argv[5], &want, "crc32"))
+		return;
+	if (z3660_init() < 0 || !n || n > 64) {
+		kprintf("dw: no Z3660, or count not 1-64\n");
+		return;
+	}
+	p = (const u8 *)(uintptr_t)addr;
+	if (crc32(p, n * 512) != want) {
+		kprintf("dw: memory has crc32 %08x, not %08x: nothing written\n",
+		    crc32(p, n * 512), want);
+		return;
+	}
+	if (z3660_write(unit, lba, n, p)) {
+		kprintf("dw: write error\n");
+		return;
+	}
+	back = addr + n * 512 + 0x1000;		/* the read-back, after the data */
+	q = (u8 *)(uintptr_t)back;
+	if (z3660_read(unit, lba, n, q)) {
+		kprintf("dw: written, but the read-back failed\n");
+		return;
+	}
+	for (i = 0; i < n * 512; i++)
+		if (q[i] != p[i]) {
+			kprintf("dw: VERIFY FAILED at byte %u\n", i);
+			return;
+		}
+	kprintf("dw: unit %u lba %u count %u written and verified\n", unit, lba, n);
+}
+
 static const struct cmd cmds[] = {
 	{ "help",  "",                  "this list", cmd_help },
 	{ "ver",   "",                  "version and boot count", cmd_ver },
@@ -1817,6 +1884,8 @@ static const struct cmd cmds[] = {
 	{ "mw",    "[.b|.w|.l] <a> <v>", "memory write (mw.b, mw.w, mw.l)", cmd_mw },
 	{ "memtest", "<addr> <len>",    "RAM test, contents kept (bus error safe)", cmd_memtest },
 	{ "net",   "<a.b.c.d>",         "Z3660 network test: ping, UDP echo/discard/send", cmd_net },
+	{ "dr",    "<unit> <lba> <n> <addr>", "Z3660 disk sectors into memory, crc32", cmd_dr },
+	{ "dw",    "<unit> <lba> <n> <addr> <crc>", "write them from memory if crc32 matches, verify", cmd_dw },
 	{ "regs",  "",                  "registers of the last exception", cmd_regs },
 	{ "dmesg", "[-p]",              "boot log (-p: previous boot)", cmd_dmesg },
 	{ "sload", "<addr> <len>",      "receive raw bytes over serial", cmd_sload },

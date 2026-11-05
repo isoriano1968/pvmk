@@ -83,6 +83,8 @@ SORIX-ILOM-LDOM> help
                                  error is "no RAM", mirrors are found
   net <a.b.c.d>                  the Z3660's network without AMIX: ping,
                                  UDP echo/discard/send (host/nettest.py)
+  dr <unit> <lba> <n> <addr>     Z3660 disk sectors into memory, crc32
+  dw <unit> <lba> <n> <addr> <crc>  write them back if crc32 matches, verify
   sload <addr> <len>             receive raw bytes over serial
   go <addr>                      call code, print D0
   regs                           registers of the last exception
