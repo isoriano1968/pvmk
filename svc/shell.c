@@ -20,6 +20,7 @@
 #include "pvmk/log.h"
 #include "pvmk/menu.h"
 #include "pvmk/mk.h"
+#include "pvmk/net.h"
 #include "pvmk/paula.h"
 #include "pvmk/rdb.h"
 #include "pvmk/scsi.h"
@@ -51,6 +52,12 @@ getc_any(int serial_only)
 	if (c < 0 && !serial_only)
 		c = kbd_getc();
 	return c;
+}
+
+int
+net_getc(void)
+{
+	return getc_any(0);
 }
 
 static int
@@ -1744,6 +1751,14 @@ cmd_memtest(int argc, char **argv)
 		    bootcap.hole_base, bootcap.hole_top - 1);
 		return;
 	}
+	/* the Z3660's registers and frames are not RAM to write patterns
+	   into: with autoconfig_rtg NO they sit at 0x10000000 */
+	if (z3660_init() == 0 && (a = z3660_board()) != 0 && lo < a + 0x08000000 &&
+	    hi > a) {
+		kprintf("memtest: %08x-%08x is the Z3660's board window\n", a,
+		    a + 0x07ffffff);
+		return;
+	}
 	probe[0] = lo;
 	probe[1] = lo + (len / 2 & ~3u);
 	probe[2] = hi - 4;
@@ -1790,6 +1805,7 @@ static const struct cmd cmds[] = {
 	{ "md",    "[-g] <addr> [len]", "memory dump (-g: guest kernel virtual)", cmd_md },
 	{ "mw",    "[.b|.w|.l] <a> <v>", "memory write (mw.b, mw.w, mw.l)", cmd_mw },
 	{ "memtest", "<addr> <len>",    "RAM test, contents kept (bus error safe)", cmd_memtest },
+	{ "net",   "<a.b.c.d>",         "Z3660 network test: ping, UDP echo/discard/send", cmd_net },
 	{ "regs",  "",                  "registers of the last exception", cmd_regs },
 	{ "dmesg", "[-p]",              "boot log (-p: previous boot)", cmd_dmesg },
 	{ "sload", "<addr> <len>",      "receive raw bytes over serial", cmd_sload },

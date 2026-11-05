@@ -46,9 +46,9 @@ PVMK_OBJS	:= $(B)/stage0/entry.o $(B)/stage0/stage0.o $(B)/stage0/libcall.o \
 		   $(B)/core/exc.o $(B)/core/amixenter.o $(B)/core/vcpu.o $(B)/core/vmmu.o $(B)/svc/menu.o \
 		   $(B)/core/vcpu_s.o $(B)/guest/pvtest/blob.o $(B)/cpu/cpu.o $(B)/cpu/probe.o $(B)/cpu/mmutest.o \
 		   $(B)/cpu/mmutest_s.o \
-		   $(B)/drv/paula.o $(B)/drv/display.o $(B)/drv/keyboard.o $(B)/drv/wd33c93.o $(B)/drv/z3660scsi.o $(B)/svc/kprintf.o $(B)/svc/log.o \
+		   $(B)/drv/paula.o $(B)/drv/display.o $(B)/drv/keyboard.o $(B)/drv/wd33c93.o $(B)/drv/z3660scsi.o $(B)/drv/z3660eth.o $(B)/svc/kprintf.o $(B)/svc/log.o \
 		   $(B)/svc/ffs.o $(B)/svc/conf.o $(B)/svc/shell.o $(B)/svc/crc32.o \
-		   $(B)/svc/disk.o $(B)/svc/rdb.o $(B)/svc/bootreq.o $(B)/svc/ufs.o $(B)/svc/amixload.o $(B)/svc/gdb.o
+		   $(B)/svc/disk.o $(B)/svc/rdb.o $(B)/svc/bootreq.o $(B)/svc/ufs.o $(B)/svc/amixload.o $(B)/svc/gdb.o $(B)/svc/net.o
 
 ADF_FILES	:= -f pvmk.conf=conf/pvmk.conf -f README=conf/README.disk
 

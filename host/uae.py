@@ -277,6 +277,9 @@ def test_one(cpu, adf, hdf, ctrl="scsi", amix_hdf=None):
             shell("md %x 4" % lo, rb"%08x: 12 34 56 78" % lo)
             shell("memtest %s 1000" % hole.group(1).decode(), rb"pvmk's own memory")
         shell("memtest 2000 0", rb"memtest: bad range")
+        # no Z3660 in FS-UAE: net says so and returns
+        shell("net 10.0.0.2", rb"net: no Z3660 ethernet")
+        shell("net 10.0.300.2", rb"usage: net")
         shell("mw 2000 deadbeef", rb"")
         shell("md 2000 4", rb"00002000: de ad be ef")
         step = "sload"

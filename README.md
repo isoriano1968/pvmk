@@ -81,6 +81,8 @@ SORIX-ILOM-LDOM> help
   mw[.b|.w|.l] <addr> <value>    memory write
   memtest <addr> <len>           RAM test that keeps the contents: a bus
                                  error is "no RAM", mirrors are found
+  net <a.b.c.d>                  the Z3660's network without AMIX: ping,
+                                 UDP echo/discard/send (host/nettest.py)
   sload <addr> <len>             receive raw bytes over serial
   go <addr>                      call code, print D0
   regs                           registers of the last exception
