@@ -668,7 +668,24 @@ ser_receive(u8 *p, u32 len)
 
 static struct amix_kernel amixk;
 static u8 *amix_image;			/* relocated ELF file, or NULL */
-static u32 amix_mem_cap;		/* boot -m: bytes for AMIX, 0 = all */
+/*
+ * The Z3660 firmware's SCSI DMA reaches only 0x08000000-0x0fffffff.  A buffer
+ * in the second 128 MB that cpu_ram2 adds (0x10000000-0x17ffffff) goes
+ * through its bounce buffer, and a write from there puts stale bytes on the
+ * disk (2026-11-05: update wrote garbage to PVMK).  Disk buffers in the
+ * Z3660's RAM stay below 0x10000000.
+ */
+#define DISK_DMA_TOP	0x10000000u
+#define Z3660_RAM_TOP	0x20000000u
+
+static u32
+disk_top(u32 top)
+{
+	return top > DISK_DMA_TOP && top <= Z3660_RAM_TOP ? DISK_DMA_TOP : top;
+}
+
+static u32 amix_mem_cap;		/* boot -m: bytes for AMIX, 0 = pvmk.conf's
+					   mem=, ~0 = all (-m 0) */
 
 /*
  * Load and relocate an AMIX kernel from dev:path (default path
@@ -715,6 +732,8 @@ amix_load(const char *arg)
 		    base < bootcap.mem[i].upper &&
 		    !(top > base && top <= bootcap.mem[i].upper))
 			top = bootcap.mem[i].upper;
+	if (base < DISK_DMA_TOP)		/* read by DMA: below 256 MB */
+		top = disk_top(top);
 	buf = (top - size - 0x10000) & ~0xffffu;
 	if (!base || !size || buf <= base + size || buf > top) {
 		kprintf("load: not enough fast RAM for a %u byte kernel\n",
@@ -829,7 +848,7 @@ amix_start(int pv)
 	u8 *chip = (u8 *)(uintptr_t)bootcap.scsi_chip;
 	struct amix_bootinfo *bi = (struct amix_bootinfo *)chip;
 	struct amix_handoff *h = (struct amix_handoff *)(chip + sizeof(*bi));
-	u32 i;
+	u32 i, cap;
 
 	if (!amix_image || !chip) {
 		kprintf("boot: no kernel loaded\n");
@@ -840,16 +859,19 @@ amix_start(int pv)
 		memcpy(bi->autocon[i], bootcap.configdev[i], sizeof(bi->autocon[0]));
 	for (i = 0; i < bootcap.nmem && i < AMIX_NAUTO; i++)
 		memcpy(bi->memory[i], bootcap.memhdr[i], sizeof(bi->memory[0]));
-	for (i = 0; amix_mem_cap && i < bootcap.nmem && i < AMIX_NAUTO; i++) {
-		u8 *mh = bi->memory[i];		/* boot -m: the kernel's region */
+	cap = amix_mem_cap ? amix_mem_cap : bootcap.conf.mem << 20;
+	if (cap == ~0u)
+		cap = 0;
+	for (i = 0; cap && i < bootcap.nmem && i < AMIX_NAUTO; i++) {
+		u8 *mh = bi->memory[i];		/* boot -m, mem=: the kernel's region */
 		u32 lo = *(u32 *)(mh + MH_LOWER), up = *(u32 *)(mh + MH_UPPER);
 
 		if (amixk.bd.tvaddr >= (lo & ~0xffu) && amixk.bd.tvaddr < up &&
-		    up - lo > amix_mem_cap) {
-			*(u32 *)(mh + MH_UPPER) = lo + amix_mem_cap;
-			*(u32 *)(mh + MH_FREE) = amix_mem_cap;
-			kprintf("boot: AMIX memory %08x-%08x (boot -m %u)\n", lo,
-			    lo + amix_mem_cap - 1, amix_mem_cap >> 20);
+		    up - lo > cap) {
+			*(u32 *)(mh + MH_UPPER) = lo + cap;
+			*(u32 *)(mh + MH_FREE) = cap;
+			kprintf("boot: AMIX memory %08x-%08x (%u MB)\n", lo,
+			    lo + cap - 1, cap >> 20);
 		}
 	}
 	bi->bootdata = amixk.bd;
@@ -1353,7 +1375,7 @@ cmd_boot(int argc, char **argv)
 		if (streq(argv[i], "-m") && i + 1 < argc) {
 			if (!need_num(argv[++i], &amix_mem_cap, "megabytes"))
 				return;
-			amix_mem_cap <<= 20;
+			amix_mem_cap = amix_mem_cap ? amix_mem_cap << 20 : ~0u;
 		} else if (streq(argv[i], "-pv"))
 			pv = 1;
 		else if (streq(argv[i], "-native"))
@@ -1568,7 +1590,7 @@ cmd_update(int argc, char **argv)
 		    ADF_BLOCKS, p->name, p->nblocks);
 		return;
 	}
-	buf = (bootcap.hole_base - size - 0x10000) & ~0xffffu;
+	buf = (disk_top(bootcap.hole_base) - size - 0x10000) & ~0xffffu;
 	back = (buf - size - 0x10000) & ~0xffffu;
 	if (ser_receive((u8 *)(uintptr_t)buf, size))
 		return;

@@ -55,6 +55,7 @@ struct conf {
 					   deprivileged (1) or native (0) */
 	u32 nentries;
 	struct conf_entry entry[CONF_MAXENT];
+	u32 mem;			/* mem=: MB for a native AMIX, 0 = all */
 };
 
 struct bootcap {
