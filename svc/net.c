@@ -356,6 +356,11 @@ cmd_net(int argc, char **argv)
 			eth_irq_pending = 0;
 			irqf += drain();
 			z3660eth_irq_rearm();
+			/* what came during the drain came with the interrupt off: the
+			   firmware's rxkick (first frame in an empty ring) and reraise
+			   (frames left after a free) act only with it on, so without
+			   this they wait for the nag (~60 Hz) */
+			irqf += drain();
 		}
 		t1 = now_ms();
 		if (irq && t1 - tp >= 100) {	/* the slow poll: what an interrupt missed */
