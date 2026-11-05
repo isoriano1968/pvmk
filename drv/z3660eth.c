@@ -40,6 +40,7 @@ u8 eth_mac[ETH_ALEN];
 
 static u32 board;
 static u16 last_serial;
+static int first;			/* no frame read yet: no gap to count */
 
 /* n bytes; long words when both ends allow it (the board is 32 bits wide) */
 static void
@@ -96,7 +97,7 @@ rd(u32 off)
 int
 z3660eth_init(void)
 {
-	u32 hi, lo, off;
+	u32 hi, lo;
 
 	if (z3660_init() < 0 || !(board = z3660_board()))
 		return -1;
@@ -113,12 +114,12 @@ z3660eth_init(void)
 	eth_mac[4] = lo >> 8;
 	eth_mac[5] = lo;
 	wr_armed(ZZ_ETH_RX_ADDR, ZZ_CONFIG, 0);	/* no interrupt: polled */
-	/* what is in the ring already (AMIX's, a reset ago) is not ours */
-	off = rd(ZZ_ETH_RX_ADDR);
-	if (off >= RX_RING && off < RX_RING + RX_SLOTS * SLOT_SIZE) {
-		volatile u8 *s = (volatile u8 *)(uintptr_t)(board + off);
-		last_serial = s[2] << 8 | s[3];
-	}
+	/* the slot at the cursor is the next one to read: the cursor moves on
+	   only when it is freed.  Its serial says nothing about whether it was
+	   read; as AMIX's driver, start below the firmware's first, 1 (after a
+	   reset without a power cycle the first frame may be an old one) */
+	last_serial = 0;
+	first = 1;
 	return 0;
 }
 
@@ -137,8 +138,9 @@ z3660eth_recv(u8 *buf, int max)
 	serial = s[2] << 8 | s[3];
 	if (serial == last_serial)
 		return 0;			/* nothing new */
-	if ((u16)(serial - last_serial) != 1)
+	if (!first && (u16)(serial - last_serial) != 1)
 		eth_stats.rx_skipped += (u16)(serial - last_serial) - 1;
+	first = 0;
 	last_serial = serial;
 	len = s[0] << 8 | s[1];
 	if (len < ETH_HLEN || len > ETH_MAXLEN) {

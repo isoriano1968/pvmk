@@ -1608,8 +1608,10 @@ cmd_update(int argc, char **argv)
  * for memory a kernel is about to be given (a new range of the Z3660, say)
  * before AMIX runs on it.  The data cache is off here (takeover), so it
  * tests the RAM.  First three probes that survive a bus error: no RAM, a
- * clean message.  Then block by block (saved, tested, restored): walking
- * ones and zeros, 0x55/0xaa, each long word's own address and its inverse.
+ * clean message.  Then block by block (saved, tested, restored): the data
+ * lines on the block's first 32 long words (word b holds bit b, then all
+ * but bit b), and over the whole block 0x55/0xaa, each long word's own
+ * address and its inverse (about 2 minutes for 128 MB on a Z3660).
  * Last, the address lines above the block: no address of the range may be
  * a mirror of another one in it, or of RAM elsewhere (addr ^ bit in the
  * memory list), as with an address decoder that ignores a line (the Z3660's
@@ -1654,8 +1656,17 @@ mt_block(volatile u32 *p, u32 n)
 
 	for (i = 0; i < n; i++)
 		mt_save[i] = p[i];
-	for (b = 0; b < 32 && !mt_errors; b++)
-		if (mt_pattern(p, n, 0, 1u << b) || mt_pattern(p, n, 0, ~(1u << b)))
+	/* the data lines: word b holds bit b alone, then all but bit b
+	   (over the whole block, 64 passes took an hour for 128 MB) */
+	for (b = 0; b < 32 && b < n; b++)
+		p[b] = 1u << b;
+	for (b = 0; b < 32 && b < n; b++)
+		if (p[b] != 1u << b && mt_fail((u32)(uintptr_t)&p[b], 1u << b, p[b]))
+			break;
+	for (b = 0; b < 32 && b < n && !mt_errors; b++)
+		p[b] = ~(1u << b);
+	for (b = 0; b < 32 && b < n && !mt_errors; b++)
+		if (p[b] != ~(1u << b) && mt_fail((u32)(uintptr_t)&p[b], ~(1u << b), p[b]))
 			break;
 	if (!mt_errors)
 		mt_pattern(p, n, 0, 0x55555555);
