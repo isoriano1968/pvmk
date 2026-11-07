@@ -7,8 +7,10 @@
 
 #include "pvmk/types.h"
 
-extern u32 z3reloc_done;	/* 1 once the bases moved: no boot until a reset */
+extern u32 z3reloc_done;	/* 1 once the bases moved (until a reset) */
 
 void cmd_z3reloc(int argc, char **argv);
+/* amix_start: the moved bases into AMIX's ConfigDevs and MemHeaders */
+void z3reloc_bootinfo(u8 (*autocon)[0x44], u32 ncd, u8 (*memory)[32], u32 nmem);
 
 #endif /* PVMK_Z3RELOC_H */

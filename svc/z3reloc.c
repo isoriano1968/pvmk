@@ -15,8 +15,8 @@
  * at the RTG's new place.  The firmware goes back to the Amiga bases by
  * itself at the next Amiga reset.
  *
- * A test command for now: AMIX is not told (bootinfo still lists the Amiga
- * bases), so boot and load refuse to run afterwards; reset to go back.
+ * boot afterwards hands AMIX the new bases (z3reloc_bootinfo); a reset
+ * brings the Amiga bases back.
  */
 #include "pvmk/types.h"
 #include "pvmk/bootcap.h"
@@ -238,6 +238,53 @@ cmd_z3reloc(int argc, char **argv)
 	    ok ? "kept" : "DIFFER");
 	z3660_relocated(Z3R_RTG_NEW);
 	kprintf("z3reloc: done.  The disks go through %08x now (scsi, part, ls);\n"
-	    "z3reloc: boot and load are off until a reset, which brings the Amiga "
+	    "z3reloc: boot gives AMIX the new bases; a reset brings the Amiga "
 	    "bases back\n", Z3R_RTG_NEW);
+}
+
+/*
+ * After z3reloc, AMIX's bootinfo (amix_start) gets the new bases: the
+ * captured ConfigDevs and MemHeaders are AmigaOS's, from before the move.
+ * The Z3660's ConfigDevs get their cd_BoardAddr (offset 32) moved, and the
+ * Z3 RAM's MemHeader its mh_First/mh_Lower/mh_Upper (offsets 16, 20, 24).
+ */
+#define CD_BOARDADDR	32
+#define MH_FIRST_OFF	16
+
+void
+z3reloc_bootinfo(u8 (*autocon)[0x44], u32 ncd, u8 (*memory)[32], u32 nmem)
+{
+	u32 i, old = 0, a, k;
+
+	if (!z3reloc_done)
+		return;
+	for (i = 0; i < ncd; i++) {
+		u8 *cd = autocon[i];
+
+		if (PEEK16(cd, 20) != Z3660_MANUFACTURER)
+			continue;
+		if (PEEK8(cd, 17) == Z3660_RAM_PRODUCT) {
+			old = PEEK32(cd, CD_BOARDADDR);
+			PEEK32(cd, CD_BOARDADDR) = Z3R_RAM_NEW;
+		} else if (PEEK8(cd, 17) == Z3660_PRODUCT)
+			PEEK32(cd, CD_BOARDADDR) = Z3R_RTG_NEW;
+	}
+	if (!old)
+		return;
+	for (i = 0; i < nmem; i++) {
+		u8 *mh = memory[i];
+		u32 lo = PEEK32(mh, 20);
+
+		if (lo < old || lo >= old + 0x10000000)
+			continue;
+		for (k = MH_FIRST_OFF; k <= 24; k += 4) {
+			a = PEEK32(mh, k);
+			if (a >= old && a <= old + 0x10000000)
+				PEEK32(mh, k) = a - old + Z3R_RAM_NEW;
+		}
+		kprintf("boot: Z3 RAM for AMIX at %08x-%08x (moved by z3reloc)\n",
+		    PEEK32(mh, 20), PEEK32(mh, 24) - 1);
+	}
+	kprintf("boot: Z3660 boards for AMIX: RAM %08x, RTG %08x\n", Z3R_RAM_NEW,
+	    Z3R_RTG_NEW);
 }

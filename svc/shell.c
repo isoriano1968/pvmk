@@ -851,10 +851,6 @@ amix_start(int pv)
 	struct amix_handoff *h = (struct amix_handoff *)(chip + sizeof(*bi));
 	u32 i, cap;
 
-	if (z3reloc_done) {	/* bootinfo would give AMIX the old bases */
-		kprintf("boot: the Z3660 moved (z3reloc) and AMIX would not know: reset first\n");
-		return;
-	}
 	if (!amix_image || !chip) {
 		kprintf("boot: no kernel loaded\n");
 		return;
@@ -864,6 +860,8 @@ amix_start(int pv)
 		memcpy(bi->autocon[i], bootcap.configdev[i], sizeof(bi->autocon[0]));
 	for (i = 0; i < bootcap.nmem && i < AMIX_NAUTO; i++)
 		memcpy(bi->memory[i], bootcap.memhdr[i], sizeof(bi->memory[0]));
+	z3reloc_bootinfo(bi->autocon, bootcap.ncd < AMIX_NAUTO ? bootcap.ncd : AMIX_NAUTO,
+	    bi->memory, bootcap.nmem < AMIX_NAUTO ? bootcap.nmem : AMIX_NAUTO);
 	cap = amix_mem_cap ? amix_mem_cap : bootcap.conf.mem << 20;
 	if (cap == ~0u)
 		cap = 0;
