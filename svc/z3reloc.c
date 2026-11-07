@@ -40,7 +40,8 @@
 
 #define AC_BASE		0xFF000000u
 
-u32 z3reloc_done;
+u32 z3reloc_done;		/* the boards were moved */
+u32 z3reloc_ok;			/* ... and committed and checked */
 
 void z3reloc_pulse(volatile u32 *reg, u32 val, u32 n);
 u32  z3reloc_spin(u32 n);
@@ -141,44 +142,42 @@ ram_board(void)
 	return 0;
 }
 
-void
-cmd_z3reloc(int argc, char **argv)
+/*
+ * The relocation itself.  0: done (bases moved and committed); -1: nothing
+ * was changed (no AMIX-mode firmware, amix_relocate NO, ...), the Amiga
+ * bases still hold and AMIX can boot on them; -2: the boards moved but the
+ * commit or the check failed: only a reset brings a usable machine back.
+ */
+int
+z3reloc_run(void)
 {
 	u32 rtg, ram, id, st, lpm, n, i, ok;
 	u32 probe[4], again[4];
 
-	(void)argv;
-	if (z3reloc_done) {
-		kprintf("z3reloc: already done (RAM %08x, RTG %08x); reset to go back\n",
-		    Z3R_RAM_NEW, Z3R_RTG_NEW);
-		return;
-	}
-	if (argc > 1) {
-		kprintf("usage: z3reloc\n");
-		return;
-	}
+	if (z3reloc_done)
+		return z3reloc_ok ? 0 : -2;
 	if (z3660_init() < 0 || !(rtg = z3660_board())) {
 		kprintf("z3reloc: no Z3660 board\n");
-		return;
+		return -1;
 	}
 	ram = ram_board();
 	if (!ram) {
 		kprintf("z3reloc: the Z3660's RAM board is not configured (autoconfig_ram NO?)\n");
-		return;
+		return -1;
 	}
 	if (safe_read32(rtg + R_CMD, &id) || id != AMIX_ID) {
 		kprintf("z3reloc: firmware without AMIX mode, or amix_relocate NO "
 		    "(%08x reads %08x)\n", rtg + R_CMD, id);
-		return;
+		return -1;
 	}
 	if (REG(rtg, R_RESET) != 1 || REG(rtg, R_STATUS) != 0) {
 		kprintf("z3reloc: firmware: bus reset %u, status %d (want 1, 0)\n",
 		    REG(rtg, R_RESET), (int)REG(rtg, R_STATUS));
-		return;
+		return -1;
 	}
 	if (rtg >= Z3R_RTG_NEW && rtg < Z3R_RTG_NEW + 0x08000000) {
 		kprintf("z3reloc: the RTG is already at %08x\n", rtg);
-		return;
+		return -1;
 	}
 	for (i = 0; i < 4; i++)		/* Z3 RAM keeps its contents: compare later */
 		probe[i] = REG(ram, 0x00100000 + i * 0x01000000);
@@ -186,7 +185,7 @@ cmd_z3reloc(int argc, char **argv)
 	lpm = loops_per_ms();
 	if (lpm < 1000) {
 		kprintf("z3reloc: wait loop calibration failed (%u turns/ms)\n", lpm);
-		return;
+		return -1;
 	}
 	n = lpm * Z3R_WAIT_MS;
 	kprintf("z3reloc: RAM %08x -> %08x, RTG %08x -> %08x\n", ram, Z3R_RAM_NEW,
@@ -201,21 +200,22 @@ cmd_z3reloc(int argc, char **argv)
 		    AC_BASE);
 		kprintf("z3reloc: status now %d at the old place\n",
 		    safe_read32(rtg + R_STATUS, &st) ? -99 : (int)st);
-		return;
+		return -1;
 	}
 	z3reloc_done = 1;		/* from here on the old bases are gone */
 	if (ac_place(Z3660_RAM_PRODUCT, Z3R_RAM_NEW, "Z3 RAM") ||
 	    ac_place(Z3660_PRODUCT, Z3R_RTG_NEW, "RTG")) {
 		kprintf("z3reloc: stopped; reset to go back\n");
-		return;
+		return -2;
 	}
 	if (ac_product() >= 0)
 		kprintf("z3reloc: another Z3660 board still waits at %08x\n", AC_BASE);
+	z3660_relocated(Z3R_RTG_NEW);	/* the RTG answers there, committed or not */
 
 	rtg = Z3R_RTG_NEW;
 	if (safe_read32(rtg + R_CMD, &id) || id != AMIX_ID) {
 		kprintf("z3reloc: the RTG does not answer at %08x (%08x)\n", rtg, id);
-		return;
+		return -2;
 	}
 	kprintf("z3reloc: firmware status after the reset: %d\n", (int)REG(rtg, R_STATUS));
 	REG(rtg, R_RAM) = Z3R_RAM_NEW;
@@ -226,7 +226,7 @@ cmd_z3reloc(int argc, char **argv)
 	    REG(rtg, R_RAM), REG(rtg, R_RTG));
 	if (st != 1) {
 		kprintf("z3reloc: the firmware refused the bases; reset to go back\n");
-		return;
+		return -2;
 	}
 	ok = 1;
 	for (i = 0; i < 4; i++) {
@@ -236,10 +236,29 @@ cmd_z3reloc(int argc, char **argv)
 	}
 	kprintf("z3reloc: Z3 RAM at %08x: contents %s\n", Z3R_RAM_NEW,
 	    ok ? "kept" : "DIFFER");
-	z3660_relocated(Z3R_RTG_NEW);
+	if (!ok)
+		return -2;
+	z3reloc_ok = 1;
 	kprintf("z3reloc: done.  The disks go through %08x now (scsi, part, ls);\n"
 	    "z3reloc: boot gives AMIX the new bases; a reset brings the Amiga "
 	    "bases back\n", Z3R_RTG_NEW);
+	return 0;
+}
+
+void
+cmd_z3reloc(int argc, char **argv)
+{
+	(void)argv;
+	if (argc > 1) {
+		kprintf("usage: z3reloc\n");
+		return;
+	}
+	if (z3reloc_done) {
+		kprintf("z3reloc: already done%s (RAM %08x, RTG %08x); reset to go back\n",
+		    z3reloc_ok ? "" : ", NOT committed", Z3R_RAM_NEW, Z3R_RTG_NEW);
+		return;
+	}
+	(void)z3reloc_run();
 }
 
 /*

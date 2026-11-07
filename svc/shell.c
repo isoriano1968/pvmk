@@ -855,6 +855,15 @@ amix_start(int pv)
 		kprintf("boot: no kernel loaded\n");
 		return;
 	}
+	/* z3reloc=yes: the Z3660 boards below the kernel's VA first; if nothing
+	   changed (older firmware, amix_relocate NO) AMIX boots on the Amiga
+	   bases, if they moved but did not commit there is no safe boot */
+	if (bootcap.conf.z3reloc && !z3reloc_done && z3reloc_run() == -1)
+		kprintf("boot: z3reloc did not run; AMIX gets the Amiga bases\n");
+	if (z3reloc_done && !z3reloc_ok) {
+		kprintf("boot: the Z3660 boards moved but z3reloc failed: reset first\n");
+		return;
+	}
 	memset(bi, 0, sizeof(*bi));
 	for (i = 0; i < bootcap.ncd && i < AMIX_NAUTO; i++)
 		memcpy(bi->autocon[i], bootcap.configdev[i], sizeof(bi->autocon[0]));

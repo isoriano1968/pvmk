@@ -56,6 +56,7 @@ struct conf {
 	u32 nentries;
 	struct conf_entry entry[CONF_MAXENT];
 	u32 mem;			/* mem=: MB for a native AMIX, 0 = all */
+	u32 z3reloc;			/* z3reloc=yes: move the Z3660 boards before AMIX */
 };
 
 struct bootcap {

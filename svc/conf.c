@@ -113,6 +113,13 @@ conf_line(struct conf *c, const char *k, u32 klen, const char *v, u32 vlen,
 		if (!parse_u32(v, vlen, &n) || n > 4096)
 			goto bad;
 		c->mem = n;
+	} else if (streq("z3reloc", k, klen)) {
+		if (streq("yes", v, vlen))
+			c->z3reloc = 1;
+		else if (streq("no", v, vlen))
+			c->z3reloc = 0;
+		else
+			goto bad;
 	} else if (streq("mode", k, klen)) {
 		if (streq("native", v, vlen))
 			c->pv = 0;
@@ -198,8 +205,9 @@ conf_show(const struct conf *c)
 	    c->display ? "on" : "off", c->keymap == KBD_DE ? "de" :
 	    c->keymap == KBD_DE_PC ? "de-pc" : "us", c->def,
 	    c->timeout, c->loglevel);
-	kprintf("menu=%s\nfallback=%u\nmode=%s\nmem=%u\n", c->menu ? "on" : "off",
-	    c->fallback, c->pv ? "pv" : "native", c->mem);
+	kprintf("menu=%s\nfallback=%u\nmode=%s\nmem=%u\nz3reloc=%s\n",
+	    c->menu ? "on" : "off", c->fallback, c->pv ? "pv" : "native", c->mem,
+	    c->z3reloc ? "yes" : "no");
 	for (u32 i = 0; i < c->nentries; i++)
 		kprintf("entry=%s,%s%s\n", c->entry[i].label, c->entry[i].target,
 		    c->entry[i].mode == ENTRY_PV ? ",pv" :

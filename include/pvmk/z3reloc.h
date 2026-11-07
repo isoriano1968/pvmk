@@ -8,6 +8,10 @@
 #include "pvmk/types.h"
 
 extern u32 z3reloc_done;	/* 1 once the bases moved (until a reset) */
+extern u32 z3reloc_ok;		/* 1 once they are committed and checked */
+
+/* 0 done, -1 nothing changed (Amiga bases), -2 moved but unusable */
+int z3reloc_run(void);
 
 void cmd_z3reloc(int argc, char **argv);
 /* amix_start: the moved bases into AMIX's ConfigDevs and MemHeaders */
