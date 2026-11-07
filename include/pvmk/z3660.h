@@ -23,6 +23,7 @@ extern struct z3660_unit z3660_units[Z3660_UNITS];
 /* 0 if the board is in the captured expansion board list. */
 int z3660_init(void);
 u32 z3660_board(void);			/* board address, 0 if absent */
+void z3660_relocated(u32 board);	/* z3reloc moved it there */
 int z3660_scan(int verbose);		/* number of units found */
 int z3660_read(u32 unit, u32 lba, u32 count, void *buf);	/* 512 bytes */
 int z3660_write(u32 unit, u32 lba, u32 count, const void *buf);

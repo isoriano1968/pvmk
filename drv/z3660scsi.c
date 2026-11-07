@@ -41,6 +41,7 @@
 struct z3660_unit z3660_units[Z3660_UNITS];
 
 static u32 board;
+static u32 board_moved;		/* z3reloc: the board's new address */
 
 #define REG(off)	(*(volatile u32 *)(uintptr_t)(board + REGS_OFFSET + (off)))
 
@@ -49,6 +50,10 @@ z3660_init(void)
 {
 	u32 i;
 
+	if (board_moved) {		/* the captured list has the old address */
+		board = board_moved;
+		return 0;
+	}
 	board = 0;
 	for (i = 0; i < bootcap.ncd; i++) {
 		const u8 *cd = bootcap.configdev[i];
@@ -76,6 +81,12 @@ z3660_init(void)
 		}
 	}
 	return -1;
+}
+
+void
+z3660_relocated(u32 b)
+{
+	board_moved = board = b;
 }
 
 u32

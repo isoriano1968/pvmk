@@ -46,7 +46,7 @@ PVMK_OBJS	:= $(B)/stage0/entry.o $(B)/stage0/stage0.o $(B)/stage0/libcall.o \
 		   $(B)/core/exc.o $(B)/core/amixenter.o $(B)/core/vcpu.o $(B)/core/vmmu.o $(B)/svc/menu.o \
 		   $(B)/core/vcpu_s.o $(B)/guest/pvtest/blob.o $(B)/cpu/cpu.o $(B)/cpu/probe.o $(B)/cpu/mmutest.o \
 		   $(B)/cpu/mmutest_s.o \
-		   $(B)/drv/paula.o $(B)/drv/display.o $(B)/drv/keyboard.o $(B)/drv/wd33c93.o $(B)/drv/z3660scsi.o $(B)/drv/z3660eth.o $(B)/svc/kprintf.o $(B)/svc/log.o \
+		   $(B)/drv/paula.o $(B)/drv/display.o $(B)/drv/keyboard.o $(B)/drv/wd33c93.o $(B)/drv/z3660scsi.o $(B)/drv/z3660eth.o $(B)/drv/z3reloc_s.o $(B)/svc/z3reloc.o $(B)/svc/kprintf.o $(B)/svc/log.o \
 		   $(B)/svc/ffs.o $(B)/svc/conf.o $(B)/svc/shell.o $(B)/svc/crc32.o \
 		   $(B)/svc/disk.o $(B)/svc/rdb.o $(B)/svc/bootreq.o $(B)/svc/ufs.o $(B)/svc/amixload.o $(B)/svc/gdb.o $(B)/svc/net.o
 
@@ -81,7 +81,16 @@ $(B)/bootblock.bin: $(B)/boot/bootblock.o
 	@test $$(stat -c %s $@) -eq 1024 || { echo "bootblock.bin is not 1024 bytes"; exit 1; }
 
 # pvtest: conformance test guest for the virtual CPU, embedded in the image
+# only with PVTEST=1 (make test needs it; the real machine's hole has no room)
+PVTEST		?= 0
 PVTEST_BASE	:= 0x60000
+ifeq ($(PVTEST),1)
+ASFLAGS		+= -DPVMK_PVTEST
+endif
+# blob.o follows a change of PVTEST
+$(B)/pvtest.flag: FORCE
+	@mkdir -p $(B)
+	@echo $(PVTEST) | cmp -s - $@ || echo $(PVTEST) > $@
 $(B)/pvtest.elf: guest/pvtest/pvtest.S
 	@mkdir -p $(B)/guest
 	$(CC) -m68030 -c $< -o $(B)/guest/pvtest.o
@@ -91,13 +100,13 @@ $(B)/pvtest.elf: guest/pvtest/pvtest.S
 $(B)/pvtest.bin: $(B)/pvtest.elf
 	$(OBJCOPY) -O binary $< $@
 
-$(B)/guest/pvtest/blob.o: $(B)/pvtest.bin
+$(B)/guest/pvtest/blob.o: $(B)/pvtest.bin $(B)/pvtest.flag
 
 $(B)/pvmk.elf: $(PVMK_OBJS) pvmk.ld
 	$(LD) $(LDFLAGS) -o $@ $(PVMK_OBJS) $(LIBGCC) -Map $(B)/pvmk.map
 
 $(B)/pvmk.bin: $(B)/pvmk.elf $(B)/host/mkimage
-	$(B)/host/mkimage $< $@
+	$(B)/host/mkimage $< $@ | tee $(B)/pvmk.bin.info
 
 $(B)/host/ufstool: host/ufstool.c svc/ufs.c include/pvmk/ufs.h
 	@mkdir -p $(@D)
@@ -157,6 +166,14 @@ size-check: $(B)/pvmk.bin $(B)/boot/bootblock.o
 	printf "pvmk image      %5d / %5d bytes\n" $$img $(BUDGET_IMAGE); \
 	test $$bb -le $(BUDGET_BOOTBLOCK) && test $$img -le $(BUDGET_IMAGE) || \
 		{ echo "size budget exceeded"; exit 1; }
+	@# stage0 places the image with its bss and relocations ("alloc"), the
+	@# supervisor stack and the log area in the hole (include/pvmk/layout.h)
+	@alloc=$$(sed -n 's/.* alloc \([0-9]*\).*/\1/p' $(B)/pvmk.bin.info); \
+	kb() { sed -n "s/^#define $$1[^(]*(\([0-9]*\) \* 1024).*/\1/p" include/pvmk/layout.h; }; \
+	room=$$(( ($$(kb HOLE_SIZE) - $$(kb SSTACK_SIZE) - $$(kb LOG_AREA_SIZE)) * 1024 )); \
+	printf "pvmk in the hole %6d / %6d bytes\n" $$alloc $$room; \
+	test -n "$$alloc" && test $$room -gt 0 && test $$alloc -le $$room || \
+		{ echo "pvmk does not fit the hole: stage0 would refuse it"; exit 1; }
 
 check: check-insns size-check verify
 
@@ -183,6 +200,7 @@ run-amix: $(B)/pvmk.adf $(B)/amix-test.hdf
 		--amix-hdf $(B)/amix-test.hdf --amix-rw
 
 test: $(B)/test/pvmk.adf $(B)/test.hdf $(B)/test/pvmk.hdf
+	@test "$(PVTEST)" = 1 || { echo "make test needs the pvtest guest: make PVTEST=1 test"; exit 1; }
 	$(PYTHON) -I host/uae.py test --cpu $(UAE_CPUS) --adf $(B)/test/pvmk.adf \
 		--hdf $(B)/test.hdf $(AMIX_OPT)
 	$(PYTHON) -I host/uae.py test-hd --cpu 030 --pvmk-hdf $(B)/test/pvmk.hdf \
@@ -192,6 +210,9 @@ test: $(B)/test/pvmk.adf $(B)/test.hdf $(B)/test/pvmk.hdf
 		--hdf $(B)/test.hdf --hdf-ctrl uae
 	$(if $(GDB),$(PYTHON) -I host/uae.py test-gdb --cpu $(UAE_CPUS) \
 		--adf $(B)/test/pvmk.adf --gdb $(GDB),@echo "test-gdb: skipped (no gdb-multiarch; GDB=...)")
+
+.PHONY: FORCE
+FORCE:
 
 toolchain:
 	host/get-toolchain.sh $(TOOLCHAIN_DIR)

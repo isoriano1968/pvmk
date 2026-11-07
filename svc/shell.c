@@ -28,6 +28,7 @@
 #include "pvmk/vcpu.h"
 #include "pvmk/vmmu.h"
 #include "pvmk/z3660.h"
+#include "pvmk/z3reloc.h"
 #include "pvmk/version.h"
 
 #define LINE_MAX	128
@@ -850,6 +851,10 @@ amix_start(int pv)
 	struct amix_handoff *h = (struct amix_handoff *)(chip + sizeof(*bi));
 	u32 i, cap;
 
+	if (z3reloc_done) {	/* bootinfo would give AMIX the old bases */
+		kprintf("boot: the Z3660 moved (z3reloc) and AMIX would not know: reset first\n");
+		return;
+	}
 	if (!amix_image || !chip) {
 		kprintf("boot: no kernel loaded\n");
 		return;
@@ -973,6 +978,10 @@ cmd_pvtest(int argc, char **argv)
 {
 	u32 size = (u32)(pvtest_image_end - pvtest_image);
 
+	if (!size) {
+		kprintf("pvtest: not built in (make PVTEST=1)\n");
+		return;
+	}
 	if (!cpuinfo.mmu_ok) {
 		kprintf("pvtest: guests need a working MMU (MMU self-test %s)\n",
 		    mmu_result());
@@ -1906,6 +1915,7 @@ static const struct cmd cmds[] = {
 	{ "mw",    "[.b|.w|.l] <a> <v>", "memory write (mw.b, mw.w, mw.l)", cmd_mw },
 	{ "memtest", "<addr> <len>",    "RAM test, contents kept (bus error safe)", cmd_memtest },
 	{ "net",   "[-i] <a.b.c.d>",    "Z3660 network test: ping, UDP echo/discard/send (-i: INT6)", cmd_net },
+	{ "z3reloc", "",                "Z3660 RAM to 0x20000000, RTG to 0x30000000 (AMIX mode test)", cmd_z3reloc },
 	{ "dr",    "<unit> <lba> <n> <addr>", "Z3660 disk sectors into memory, crc32", cmd_dr },
 	{ "dw",    "<unit> <lba> <n> <addr> <crc>", "write them from memory if crc32 matches, verify", cmd_dw },
 	{ "regs",  "",                  "registers of the last exception", cmd_regs },
